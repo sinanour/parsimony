@@ -21,8 +21,24 @@ const PATH_PREFIX = 'PATH="$PATH:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin"
  * Runs commands on the target with the system `ssh`, so keys, agents, jump hosts and ~/.ssh/config
  * all work as usual. One multiplexed connection is reused for the whole run.
  */
+/**
+ * Picks a short directory for the SSH ControlPath socket. macOS caps unix-socket
+ * paths at 104 bytes (`sun_path`), and `os.tmpdir()` on macOS is a long
+ * `/var/folders/...` path that, combined with SSH's 40-char `%C` expansion,
+ * overflows that limit. `/tmp` is short on macOS and Linux both; fall back to
+ * `os.tmpdir()` if it isn't writable.
+ */
+function makeControlDir(): string {
+  const prefix = 'psm-ssh.';
+  try {
+    return fs.mkdtempSync(path.join('/tmp', prefix));
+  } catch {
+    return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  }
+}
+
 export class Ssh implements Shell {
-  private readonly controlDir = fs.mkdtempSync(path.join(os.tmpdir(), 'parsimony-ssh-'));
+  private readonly controlDir = makeControlDir();
 
   constructor(
     private readonly opts: SshOptions,
