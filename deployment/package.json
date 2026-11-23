@@ -1,0 +1,25 @@
+{
+  "name": "@parsimony/deployment",
+  "version": "1.0.0",
+  "private": true,
+  "license": "MIT",
+  "description": "Deploys Parsimony to a remote host over SSH as Docker/Finch containers",
+  "type": "module",
+  "engines": { "node": ">=22.13" },
+  "scripts": {
+    "deploy": "tsx src/cli.ts deploy",
+    "rollback": "tsx src/cli.ts rollback",
+    "status": "tsx src/cli.ts status",
+    "logs": "tsx src/cli.ts logs",
+    "update-certs": "tsx src/cli.ts update-certs",
+    "users": "tsx src/cli.ts users",
+    "cli": "tsx src/cli.ts",
+    "test": "node --import tsx --test test/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "name": "@parsimony/backend-api",
+  "version": "1.0.0",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "dev": "node --disable-warning=ExperimentalWarning --import tsx --watch src/index.ts",
+    "start": "node --disable-warning=ExperimentalWarning --import tsx src/index.ts",
+    "users": "node --disable-warning=ExperimentalWarning --import tsx src/cli/users.ts",
+    "test": "node --disable-warning=ExperimentalWarning --import tsx --test --test-concurrency=1 test/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "demo-data": "node --disable-warning=ExperimentalWarning --import tsx src/cli/demo-data.ts"
+  },
+  "dependencies": {
+    "jose": "^5.9.6",
+    "nodemailer": "^6.9.16",
+    "pdfjs-dist": "^6.5.438",
+    "tsx": "^4.19.0",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.0",
+    "@types/nodemailer": "^6.4.17",
+    "typescript": "^5.6.0"
+  }
+}

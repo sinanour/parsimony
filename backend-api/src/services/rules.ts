@@ -1,0 +1,207 @@
+// Port of expense_categorizer.py. Semantics and the comment format written to expense.comment are kept
+// identical so rows categorized by the app and by the legacy script are indistinguishable.
+import type { Db } from '../db';
+import type { Rule, RuleInput, RuleMatch, RulePreview, RuleRunResponse, RuleRunResult } from '../../../shared/types';
+
+export const AMOUNT_FLOOR = -2000000000;
+export const AMOUNT_CEIL = 2000000000;
+
+export const RULE_PREDICATE =
+  'category IS NULL AND description LIKE ? AND amount >= ? AND amount <= ? ' +
+  'AND account_idx IN (SELECT account_idx FROM account WHERE is_corporate = ?)';
+
+interface RuleRow {
+  expense_categorization_rule_idx: number;
+  description_filter: string;
+  minimum_amount: number | null;
+  maximum_amount: number | null;
+  category: string | null;
+  exemption: number | null;
+  is_corporate: number;
+}
+
+/** Mirrors Python's str() for the values the script interpolates. */
+function pyStr(v: unknown, kind: 'float' | 'int' | 'str'): string {
+  if (v === null || v === undefined) return 'None';
+  if (kind === 'str') return String(v);
+  const n = Number(v);
+  if (kind === 'int') return String(Math.trunc(n));
+  if (!Number.isFinite(n)) return n > 0 ? 'inf' : n < 0 ? '-inf' : 'nan';
+  if (Number.isInteger(n) && Math.abs(n) < 1e16) return `${n}.0`;
+  return String(n);
+}
+
+export function likePattern(filter: string): string {
+  return filter.includes('_') || filter.includes('%') ? filter : `%${filter}%`;
+}
+
+export interface CompiledRule {
+  rule: RuleRow;
+  bindValues: (string | number)[];
+  /** Python str() of each bind value, used to build the comment. */
+  bindStrings: string[];
+}
+
+export function compileRule(rule: RuleRow): CompiledRule {
+  const pattern = likePattern(rule.description_filter);
+  const min = rule.minimum_amount ?? AMOUNT_FLOOR;
+  const max = rule.maximum_amount ?? AMOUNT_CEIL;
+  const corp = rule.is_corporate ? 1 : 0;
+  return {
+    rule,
+    bindValues: [pattern, min, max, corp],
+    bindStrings: [
+      pattern,
+      // Defaults are Python ints; DB values are REAL → Python floats.
+      rule.minimum_amount === null ? pyStr(min, 'int') : pyStr(min, 'float'),
+      rule.maximum_amount === null ? pyStr(max, 'int') : pyStr(max, 'float'),
+      String(corp),
+    ],
+  };
+}
+
+/** Replaces each "?" in turn, exactly like the Python loop (first occurrence, left to right). */
+function inline(text: string, values: string[]): string {
+  let out = text;
+  for (const v of values) {
+    const i = out.indexOf('?');
+    if (i < 0) break;
+    out = out.slice(0, i) + v + out.slice(i + 1);
+  }
+  return out;
+}
+
+export function utcTimestamp(d = new Date()): string {
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())} ${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:${p(d.getUTCSeconds())} UTC`;
+}
+
+export function ruleComment(c: CompiledRule, now: string): string {
+  const head = `Automatic Rule (${now}): Category = ${pyStr(c.rule.category, 'str')}, exemption = ${pyStr(c.rule.exemption, 'float')} where ${RULE_PREDICATE}`;
+  return inline(head, c.bindStrings);
+}
+
+export function inlinedPredicate(c: CompiledRule): string {
+  return inline(RULE_PREDICATE, c.bindStrings);
+}
+
+const RULE_COLUMNS =
+  'expense_categorization_rule_idx, description_filter, minimum_amount, maximum_amount, category, exemption, is_corporate';
+
+export function fetchRules(db: Db, isCorporate: boolean): RuleRow[] {
+  return db.all<RuleRow>(
+    `SELECT ${RULE_COLUMNS} FROM expense_categorization_rule WHERE is_corporate = ? ORDER BY expense_categorization_rule_idx`,
+    [isCorporate ? 1 : 0],
+  );
+}
+
+const MATCH_SELECT = `SELECT e.expense_idx AS expenseIdx, e.transaction_date AS transactionDate, e.description,
+  e.amount, a.name AS accountName FROM expense e JOIN account a USING (account_idx)`;
+
+export function runRules(db: Db, isCorporate: boolean, dryRun: boolean, matchLimit = 500): RuleRunResponse {
+  const now = utcTimestamp();
+  const results: RuleRunResult[] = [];
+  const rollback = new Error('dry-run rollback');
+
+  try {
+    db.tx(() => {
+      for (const rule of fetchRules(db, isCorporate)) {
+        const c = compileRule(rule);
+        const matches = db.all<RuleMatch>(
+          `${MATCH_SELECT} WHERE e.expense_idx IN (SELECT expense_idx FROM expense WHERE ${RULE_PREDICATE})
+           ORDER BY e.transaction_date DESC LIMIT ${matchLimit}`,
+          c.bindValues,
+        );
+        const r = db.run(`UPDATE expense SET category = ?, exemption = ?, comment = ? WHERE ${RULE_PREDICATE}`, [
+          rule.category,
+          rule.exemption,
+          ruleComment(c, now),
+          ...c.bindValues,
+        ]);
+        if (r.changes > 0) {
+          results.push({
+            ruleIdx: rule.expense_categorization_rule_idx,
+            descriptionFilter: rule.description_filter,
+            category: rule.category,
+            exemption: rule.exemption,
+            rowCount: r.changes,
+            predicate: inlinedPredicate(c),
+            matches,
+          });
+        }
+      }
+      if (dryRun) throw rollback;
+    });
+  } catch (e) {
+    if (e !== rollback) throw e;
+  }
+
+  return {
+    scope: isCorporate ? 'corporate' : 'personal',
+    dryRun,
+    timestamp: now,
+    totalRows: results.reduce((s, r) => s + r.rowCount, 0),
+    results,
+  };
+}
+
+/** Per-rule match counts against currently uncategorized expenses, each rule evaluated on its own. */
+export function matchCounts(db: Db): Map<number, number> {
+  const rows = db.all<{ idx: number; n: number }>(
+    `WITH u AS MATERIALIZED (
+       SELECT e.description, e.amount, a.is_corporate FROM expense e JOIN account a USING (account_idx)
+       WHERE e.category IS NULL)
+     SELECT r.expense_categorization_rule_idx AS idx, COUNT(u.amount) AS n
+     FROM expense_categorization_rule r
+     LEFT JOIN u ON u.is_corporate = r.is_corporate
+       AND u.description LIKE (CASE WHEN instr(r.description_filter, '%') > 0 OR instr(r.description_filter, '_') > 0
+                                    THEN r.description_filter ELSE '%' || r.description_filter || '%' END)
+       AND u.amount >= COALESCE(r.minimum_amount, ${AMOUNT_FLOOR})
+       AND u.amount <= COALESCE(r.maximum_amount, ${AMOUNT_CEIL})
+     GROUP BY 1`,
+  );
+  return new Map(rows.map((r) => [r.idx, r.n]));
+}
+
+export function previewRule(db: Db, input: Pick<RuleInput, 'descriptionFilter' | 'minimumAmount' | 'maximumAmount' | 'isCorporate'>, limit = 200): RulePreview {
+  const c = compileRule({
+    expense_categorization_rule_idx: 0,
+    description_filter: input.descriptionFilter,
+    minimum_amount: input.minimumAmount,
+    maximum_amount: input.maximumAmount,
+    category: null,
+    exemption: null,
+    is_corporate: input.isCorporate ? 1 : 0,
+  });
+  const where = `e.expense_idx IN (SELECT expense_idx FROM expense WHERE ${RULE_PREDICATE})`;
+  const total = db.scalar<number>(`SELECT COUNT(*) FROM expense e WHERE ${where}`, c.bindValues);
+  const items = db.all<RuleMatch>(`${MATCH_SELECT} WHERE ${where} ORDER BY e.transaction_date DESC LIMIT ${limit}`, c.bindValues);
+  return { total, items };
+}
+
+export function toRule(r: RuleRow, matchCount = 0): Rule {
+  return {
+    ruleIdx: r.expense_categorization_rule_idx,
+    descriptionFilter: r.description_filter,
+    minimumAmount: r.minimum_amount,
+    maximumAmount: r.maximum_amount,
+    category: r.category,
+    exemption: r.exemption,
+    isCorporate: !!r.is_corporate,
+    matchCount,
+  };
+}
+
+export function listRules(db: Db, isCorporate?: boolean): Rule[] {
+  const counts = matchCounts(db);
+  const rows = db.all<RuleRow>(
+    `SELECT ${RULE_COLUMNS} FROM expense_categorization_rule ${isCorporate === undefined ? '' : 'WHERE is_corporate = ?'}
+     ORDER BY expense_categorization_rule_idx`,
+    isCorporate === undefined ? [] : [isCorporate ? 1 : 0],
+  );
+  return rows.map((r) => toRule(r, counts.get(r.expense_categorization_rule_idx) ?? 0));
+}
+
+export function getRuleRow(db: Db, idx: number): RuleRow | undefined {
+  return db.get<RuleRow>(`SELECT ${RULE_COLUMNS} FROM expense_categorization_rule WHERE expense_categorization_rule_idx = ?`, [idx]);
+}

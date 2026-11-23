@@ -1,0 +1,34 @@
+# Parsimony API (Node.js). Build from the repository root:
+#   docker build -f deployment/dockerfiles/Dockerfile.backend -t parsimony-backend .
+FROM node:24-alpine
+
+# tini forwards signals to node as PID 1; su-exec drops root after fixing /data ownership.
+RUN apk add --no-cache tini su-exec \
+ && addgroup -S -g 1001 parsimony \
+ && adduser -S -D -H -u 1001 -G parsimony parsimony
+
+WORKDIR /app
+
+# Node dependencies (production only, backend workspace only).
+COPY package.json package-lock.json ./
+COPY backend-api/package.json backend-api/package.json
+COPY web-frontend/package.json web-frontend/package.json
+RUN npm ci --omit=dev --workspace backend-api --include-workspace-root=false && npm cache clean --force
+
+COPY shared shared
+COPY backend-api/tsconfig.json backend-api/tsconfig.json
+COPY backend-api/src backend-api/src
+COPY deployment/dockerfiles/backend-entrypoint.sh /usr/local/bin/backend-entrypoint.sh
+RUN chmod 0755 /usr/local/bin/backend-entrypoint.sh && mkdir -p /data && chown parsimony:parsimony /data
+
+ENV NODE_ENV=production \
+    HOST=0.0.0.0 \
+    PORT=3001 \
+    DATA_DIR=/data \
+    TRUST_PROXY=true \
+    WEB_DIST=/nonexistent
+
+VOLUME /data
+EXPOSE 3001
+ENTRYPOINT ["/sbin/tini", "--", "/usr/local/bin/backend-entrypoint.sh"]
+CMD ["node", "--disable-warning=ExperimentalWarning", "--import", "tsx", "backend-api/src/index.ts"]

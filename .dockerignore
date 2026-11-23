@@ -1,0 +1,16 @@
+**/node_modules
+**/dist
+**/coverage
+**/.env
+**/.env.*
+**/*.sqlite*
+**/__pycache__
+**/.DS_Store
+.git
+data
+backups
+docs
+backend-api/test
+# Only the Dockerfiles and their scripts are needed from deployment/
+deployment/*
+!deployment/dockerfiles

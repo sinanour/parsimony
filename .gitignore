@@ -1,0 +1,28 @@
+node_modules/
+dist/
+coverage/
+*.log
+.DS_Store
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+
+# Data: databases, backups and the generated JWT secret
+data/
+backups/
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+
+# Deployment secrets and local state
+deployment/config/.env
+deployment/config/certs/*
+!deployment/config/certs/.gitkeep
+deployment/.state/
+
+__pycache__/
+*.pyc
+.venv/
