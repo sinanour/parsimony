@@ -1,7 +1,6 @@
 import { useMemo, useState } from 'react';
 import BarChart, { type BarChartProps } from '@cloudscape-design/components/bar-chart';
 import Box from '@cloudscape-design/components/box';
-import Button from '@cloudscape-design/components/button';
 import Container from '@cloudscape-design/components/container';
 import ContentLayout from '@cloudscape-design/components/content-layout';
 import Grid from '@cloudscape-design/components/grid';
@@ -14,6 +13,7 @@ import { UNCATEGORIZED, type MonthlySpendingRow, type Scope } from '../../../sha
 import { api } from '../api/client';
 import { RouterLink, ScopeControl } from '../components/common';
 import { DueStatus } from '../components/DueStatus';
+import { ResponsiveButton } from '../components/ResponsiveButton';
 import PaymentModal from '../components/PaymentModal';
 import { useAsync } from '../hooks/useAsync';
 import { formatMoney } from '../utils/format';
@@ -103,12 +103,17 @@ export default function DashboardPage() {
             { id: 'from', header: 'Paid from', cell: (p) => p.payerAccountName },
             {
               id: 'actions',
-              header: '',
+              header: 'Actions',
               cell: (p) =>
                 canEdit && (
-                  <Button variant="inline-link" onClick={() => setPayFor(p.payeeIdx)}>
+                  <ResponsiveButton
+                    iconName="add-plus"
+                    mobileIcon="add-plus"
+                    mobileAriaLabel={`Record payment to ${p.payee}`}
+                    onClick={() => setPayFor(p.payeeIdx)}
+                  >
                     Record payment
-                  </Button>
+                  </ResponsiveButton>
                 ),
             },
           ]}

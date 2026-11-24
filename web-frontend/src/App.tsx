@@ -5,6 +5,7 @@ import AppLayout from '@cloudscape-design/components/app-layout';
 import BreadcrumbGroup from '@cloudscape-design/components/breadcrumb-group';
 import Box from '@cloudscape-design/components/box';
 import Flashbar from '@cloudscape-design/components/flashbar';
+import Icon, { type IconProps } from '@cloudscape-design/components/icon';
 import Spinner from '@cloudscape-design/components/spinner';
 import SideNavigation, { type SideNavigationProps } from '@cloudscape-design/components/side-navigation';
 import TopNavigation from '@cloudscape-design/components/top-navigation';
@@ -32,48 +33,55 @@ import PaymentTotalsPage from './pages/PaymentTotalsPage';
 import CoveragePage from './pages/CoveragePage';
 import NotFoundPage from './pages/NotFoundPage';
 
-const ADMIN_NAV: SideNavigationProps.Item = {
-  type: 'section',
-  text: 'Administration',
-  items: [
-    { type: 'link', text: 'Users', href: '/admin/users' },
-    { type: 'link', text: 'Audit log', href: '/admin/audit' },
-  ],
-};
+/** A side-navigation link with a built-in Cloudscape icon before its text. */
+function link(text: string, href: string, icon: IconProps.Name): SideNavigationProps.Link {
+  return { type: 'link', text, href, icon: <Icon name={icon} /> };
+}
+
+/** Links only shown to administrators. */
+const ADMIN_ONLY = ['/admin/users', '/admin/audit'];
+/** Links hidden from users who can't change data. */
+const EDIT_ONLY = ['/import', '/statement-formats'];
 
 const NAV_ITEMS: SideNavigationProps.Item[] = [
-  { type: 'link', text: 'Dashboard', href: '/' },
+  link('Dashboard', '/', 'grid-view'),
+  { type: 'divider' },
   {
     type: 'section',
     text: 'Bills',
-    items: [
-      { type: 'link', text: 'Payments', href: '/payments' },
-      { type: 'link', text: 'Payees', href: '/payees' },
-    ],
+    items: [link('Payments', '/payments', 'calendar'), link('Payees', '/payees', 'contact')],
   },
   {
     type: 'section',
     text: 'Transactions',
     items: [
-      { type: 'link', text: 'Expenses', href: '/expenses' },
-      { type: 'link', text: 'Deposits', href: '/deposits' },
-      { type: 'link', text: 'Categorization rules', href: '/rules' },
-      { type: 'link', text: 'Import statements', href: '/import' },
-      { type: 'link', text: 'Statement formats', href: '/statement-formats' },
+      link('Expenses', '/expenses', 'arrow-up'),
+      link('Deposits', '/deposits', 'arrow-down'),
+      link('Categorization rules', '/rules', 'filter'),
+      link('Import statements', '/import', 'upload'),
+      link('Corporate export', '/reports/corporate', 'download'),
     ],
   },
   {
     type: 'section',
     text: 'Reports',
     items: [
-      { type: 'link', text: "Huqúqu'lláh", href: '/reports/huquq' },
-      { type: 'link', text: 'Corporate export', href: '/reports/corporate' },
-      { type: 'link', text: 'Payment totals', href: '/reports/payment-totals' },
-      { type: 'link', text: 'Statement coverage', href: '/reports/coverage' },
+      link("Huqúqu'lláh", '/reports/huquq', 'heart'),
+      link('Payment totals', '/reports/payment-totals', 'bar-chart'),
+      link('Statement coverage', '/reports/coverage', 'check'),
     ],
   },
   { type: 'divider' },
-  { type: 'link', text: 'Accounts', href: '/accounts' },
+  {
+    type: 'section',
+    text: 'Administration',
+    items: [
+      link('Accounts', '/accounts', 'folder'),
+      link('Statement formats', '/statement-formats', 'settings'),
+      link('Users', '/admin/users', 'group'),
+      link('Audit log', '/admin/audit', 'history'),
+    ],
+  },
 ];
 
 const TITLES: Record<string, string> = {
@@ -106,14 +114,12 @@ const CONTENT_TYPE: Record<string, 'table' | 'default' | 'dashboard'> = {
   '/admin/audit': 'table',
 };
 
-/** Hides the import pages from users who can't change data, and adds administration for admins. */
-const IMPORT_ONLY = ['/import', '/statement-formats'];
-
+/** Hides the import pages from users who can't change data, and user administration from non-admins. */
 function navItems(canEdit: boolean, isAdmin: boolean): SideNavigationProps.Item[] {
-  const items = NAV_ITEMS.map((i) =>
-    !canEdit && i.type === 'section' ? { ...i, items: i.items.filter((x) => !(x.type === 'link' && IMPORT_ONLY.includes(x.href))) } : i,
+  const hidden = [...(canEdit ? [] : EDIT_ONLY), ...(isAdmin ? [] : ADMIN_ONLY)];
+  return NAV_ITEMS.map((i) =>
+    i.type === 'section' ? { ...i, items: i.items.filter((x) => !(x.type === 'link' && hidden.includes(x.href))) } : i,
   );
-  return isAdmin ? [...items, ADMIN_NAV] : items;
 }
 
 function useDarkMode(): [boolean, (v: boolean) => void] {

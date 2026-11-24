@@ -15,6 +15,7 @@ import type { Payment, UpcomingPayment } from '../../../shared/types';
 import { api } from '../api/client';
 import { AccountSelect, ConfirmModal, DateRangeFilter, EmptyState, type IsoRange } from '../components/common';
 import { DueStatus } from '../components/DueStatus';
+import { ResponsiveButton } from '../components/ResponsiveButton';
 import PaymentModal from '../components/PaymentModal';
 import { useApp } from '../context/AppContext';
 import { useAsync } from '../hooks/useAsync';
@@ -66,12 +67,17 @@ function UpcomingTab({ onPay, version }: { onPay: (payeeIdx: number) => void; ve
         { id: 'from', header: 'Paid from', cell: (p) => p.payerAccountName },
         {
           id: 'pay',
-          header: '',
+          header: 'Actions',
           cell: (p) =>
             canEdit && (
-              <Button variant="inline-link" onClick={() => onPay(p.payeeIdx)}>
+              <ResponsiveButton
+                iconName="add-plus"
+                mobileIcon="add-plus"
+                mobileAriaLabel={`Record payment to ${p.payee}`}
+                onClick={() => onPay(p.payeeIdx)}
+              >
                 Record payment
-              </Button>
+              </ResponsiveButton>
             ),
         },
       ]}
