@@ -167,7 +167,11 @@ function SignedOutShell({ dark, setDark }: ShellProps) {
       {topNav &&
         createPortal(
           <TopNavigation
-            identity={{ href: '/', title: 'Parsimony' }}
+            identity={{
+              href: '/',
+              title: 'Parsimony',
+              logo: { src: '/icons/parsimony-icon.svg', alt: 'Parsimony' },
+            }}
             utilities={[{ type: 'button', text: dark ? 'Light mode' : 'Dark mode', onClick: () => setDark(!dark) }]}
           />,
           topNav,
@@ -212,6 +216,7 @@ function SignedInShell({ dark, setDark }: ShellProps) {
             identity={{
               href: '/',
               title: 'Parsimony',
+              logo: { src: '/icons/parsimony-icon.svg', alt: 'Parsimony' },
               onFollow: (e) => {
                 e.preventDefault();
                 navigate('/');
