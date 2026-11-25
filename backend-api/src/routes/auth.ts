@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import type { Ctx } from '../http';
+import { HttpError, unauthorized, type Ctx } from '../http';
 import type { IssuedSession } from '../auth/service';
 import { passwordSchema } from '../auth/passwords';
 import { ROLES, type AuthSession, type PublicConfig, type User } from '../../../shared/types';
@@ -42,7 +42,13 @@ const client = (ctx: Ctx) => ({ ip: ctx.ip, userAgent: ctx.req.headers['user-age
 
 export const authRoutes: RouteModule = (r, deps) => {
   const { auth } = deps;
+  /** Public routes with a per-IP request budget. */
   const pub = { access: 'public', audit: false, limit: 'auth' } as const;
+  /**
+   * Public routes that throttle themselves on something callers can't share or spend for each other:
+   * login (per submitted account + per-IP *failures*), refresh (per presented session), logout (no-op without a cookie).
+   */
+  const selfThrottled = { access: 'public', audit: false } as const;
 
   r.get(
     '/api/config',
@@ -71,20 +77,24 @@ export const authRoutes: RouteModule = (r, deps) => {
       const b = z.object({ email: z.string().max(254), password: z.string().max(1024) }).parse(ctx.body);
       return respond(ctx, deps, await auth.login(b.email, b.password, client(ctx)));
     },
-    pub,
+    selfThrottled,
   );
 
   r.post(
     '/api/auth/refresh',
     async (ctx) => {
+      const token = readCookie(ctx, REFRESH_COOKIE);
+      // No cookie (e.g. a cross-site request): reject before any limiter or database work.
+      if (!token) throw unauthorized('Your session has ended. Sign in again.', 'SESSION_EXPIRED');
       try {
-        return respond(ctx, deps, await auth.refresh(readCookie(ctx, REFRESH_COOKIE), client(ctx)));
+        return respond(ctx, deps, await auth.refresh(token, client(ctx)));
       } catch (e) {
-        setRefreshCookie(ctx, deps, null);
+        // Being throttled doesn't end the session; keep the cookie so the next attempt can succeed.
+        if (!(e instanceof HttpError && e.status === 429)) setRefreshCookie(ctx, deps, null);
         throw e;
       }
     },
-    pub,
+    selfThrottled,
   );
 
   r.post(
@@ -93,7 +103,7 @@ export const authRoutes: RouteModule = (r, deps) => {
       auth.logout(readCookie(ctx, REFRESH_COOKIE), client(ctx));
       setRefreshCookie(ctx, deps, null);
     },
-    pub,
+    selfThrottled,
   );
 
   r.post(

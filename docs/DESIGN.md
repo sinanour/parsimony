@@ -45,7 +45,7 @@ Why these choices:
 | `auth/passwords.ts` | scrypt hashing (N=2¹⁷, r=8, p=1), timing-safe verification, dummy hash for unknown emails. |
 | `auth/tokens.ts` | JWT signing/verification (HS256), secret loading/generation, reset-token fingerprints. |
 | `auth/service.ts` | Users, sessions, sign-in, refresh rotation, revocation, setup code, password change/reset, audit log. |
-| `auth/rate-limit.ts` | Fixed-window in-memory limiter. |
+| `auth/rate-limit.ts` | Fixed-window in-memory limiter, and the per-account escalating sign-in lockout. |
 | `auth/mailer.ts` | Optional SMTP via nodemailer. |
 | `routes/*.ts` | One module per resource. `routes/auth.ts` also holds user administration and the audit log. |
 | `services/rules.ts` | The rule engine (§2.5). |

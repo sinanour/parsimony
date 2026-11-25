@@ -72,7 +72,10 @@ export interface RouteOptions {
   access?: Access;
   /** Set false for routes that write their own, more specific audit entries. */
   audit?: boolean;
-  /** Rate-limit bucket. `auth` routes are limited per IP; others per user. */
+  /**
+   * Rate-limit bucket. `auth` routes are limited per route and IP (per user when signed in); others per user.
+   * Public routes left on `api` are not limited by the router and must throttle themselves (login, refresh).
+   */
   limit?: 'auth' | 'api';
 }
 

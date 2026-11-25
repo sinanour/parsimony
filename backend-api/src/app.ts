@@ -69,7 +69,7 @@ export async function createApp(config: Config, opts: AppOptions = {}): Promise<
   router.guard = {
     authenticate: (req) => auth.authenticate(req),
     rateLimit: (route: Route, ctx: Ctx) => {
-      if (route.limit === 'auth') auth.authLimiter.hit(`${route.pattern}|${ctx.ip}`);
+      if (route.limit === 'auth') auth.limitAuthRoute(route, ctx.user, { ip: ctx.ip });
       else if (ctx.user) auth.apiLimiter.hit(`user:${ctx.user.userId}`);
     },
     audit: (route: Route, ctx: Ctx, status: number) =>

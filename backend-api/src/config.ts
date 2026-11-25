@@ -58,7 +58,17 @@ export function loadConfig() {
       refreshTokenTtl: parseDuration('REFRESH_TOKEN_TTL', env('REFRESH_TOKEN_TTL', '7d')),
       passwordResetTtl: parseDuration('PASSWORD_RESET_TTL', env('PASSWORD_RESET_TTL', '30m')),
       cookieSecure: cookieSecure as 'auto' | 'true' | 'false',
+      /** Per client IP, per route: setup, forgot-password and reset-password requests; per user: password changes. */
       authRateLimit: int('AUTH_RATE_LIMIT_PER_MINUTE', 10),
+      /** Failed sign-ins per client IP per minute (successful sign-ins never count). */
+      loginIpFailureLimit: int('LOGIN_IP_FAILURES_PER_MINUTE', 100),
+      /** Consecutive failed sign-ins for one email before it is temporarily locked (0 disables). */
+      loginLockoutThreshold: int('LOGIN_LOCKOUT_THRESHOLD', 5),
+      /** First lock length; each further failure doubles it up to loginLockoutMax (seconds). */
+      loginLockoutBase: parseDuration('LOGIN_LOCKOUT_BASE', env('LOGIN_LOCKOUT_BASE', '1m')),
+      loginLockoutMax: parseDuration('LOGIN_LOCKOUT_MAX', env('LOGIN_LOCKOUT_MAX', '15m')),
+      /** Refresh requests per session per minute. */
+      refreshRateLimit: int('REFRESH_RATE_LIMIT_PER_MINUTE', 30),
       apiRateLimit: int('API_RATE_LIMIT_PER_MINUTE', 600),
       auditRetentionDays: int('AUDIT_RETENTION_DAYS', 365),
       adminEmail: env('ADMIN_EMAIL', ''),

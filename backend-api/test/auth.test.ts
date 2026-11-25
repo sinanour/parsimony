@@ -237,11 +237,12 @@ describe('first run', () => {
 });
 
 describe('abuse protection and audit', () => {
-  test('sign-in is rate-limited per IP', async () => {
-    const p = await startApp({ seed: false, overrides: { auth: { authRateLimit: 3 } } });
+  test('failed sign-ins are rate-limited per IP', async () => {
+    // Detailed throttling/lockout behaviour lives in auth-throttle.test.ts.
+    const p = await startApp({ seed: false, overrides: { auth: { loginIpFailureLimit: 3 } } });
     try {
       const statuses = [];
-      for (let i = 0; i < 4; i++) statuses.push((await p.api('POST', '/api/auth/login', { email: 'x@y.z', password: 'whatever-1' })).status);
+      for (let i = 0; i < 4; i++) statuses.push((await p.api('POST', '/api/auth/login', { email: `x${i}@y.z`, password: 'whatever-1' })).status);
       assert.deepEqual(statuses, [401, 401, 401, 429]);
       const res = await p.api('POST', '/api/auth/login', { email: 'x@y.z', password: 'whatever-1' });
       assert.ok(Number(res.headers.get('retry-after')) > 0);

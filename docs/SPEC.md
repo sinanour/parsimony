@@ -164,7 +164,11 @@ is a separate package because only operators need it.
 * U15 — **Forgot password (optional).** When SMTP **and** `PUBLIC_URL` are configured, the sign-in page offers "Forgot password?". Reset links are always built from `PUBLIC_URL`, never from the request's Host header. The API always replies with the same message whether or not the email exists. Reset links expire after 30 minutes and stop working once the password has been changed. Without SMTP the link is hidden and an administrator resets passwords instead.
 
 ### 6.5 Abuse protection and audit
-* U16 — Sign-in, setup, refresh and password-reset endpoints are rate-limited per client IP (default 10 requests/minute). Other API calls are rate-limited per user (default 600/minute). Exceeding a limit returns 429 with `Retry-After`.
+* U16 — Abuse limits, none of which one caller can spend on another's behalf. Exceeding a limit returns 429 with `Retry-After`; throttled attempts are audited (at most one row per key per minute).
+  * Sign-in: after 5 consecutive failures for an email (registered or not, so a lock reveals nothing) it is locked for 1 minute, doubling with each further failure up to 15 minutes; a successful sign-in clears the streak. Separately, each client IP may fail at most 100 sign-ins per minute; successful sign-ins never count. Failed sign-ins for a registered email are audited against that user.
+  * Refresh: limited per session (default 30/minute); requests without the refresh cookie are rejected before any limit is counted. Sign-out is not rate-limited.
+  * Setup and password-reset endpoints: per client IP (default 10 requests/minute); password change: per user.
+  * Other API calls are rate-limited per user (default 600/minute).
 * U17 — The audit log records sign-in success and failure, sign-out, password changes and resets, user administration, and every data-changing request (user, method, path, status, IP, time). Administrators can browse it in the UI. Entries older than `AUDIT_RETENTION_DAYS` (default 365) are pruned at startup.
 
 ## 7. Non-functional requirements

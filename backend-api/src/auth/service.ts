@@ -7,7 +7,7 @@ import type { AuditEntry, AuthSession, AuthUser, Role, User } from '../../../sha
 import { dummyHash, hashPassword, verifyPassword } from './passwords';
 import { fingerprint, randomToken, safeEqual, sha256, TokenSigner } from './tokens';
 import type { Mailer } from './mailer';
-import { RateLimiter } from './rate-limit';
+import { LoginLockout, RateLimiter, tooManyRequests } from './rate-limit';
 
 interface UserRow {
   user_id: number;
@@ -58,9 +58,21 @@ const nowSeconds = () => Math.floor(Date.now() / 1000);
 
 const toAuthUser = (u: UserRow): AuthUser => ({ userId: u.user_id, email: u.email, displayName: u.display_name, role: u.role });
 
+/** Normalises a submitted email for throttling, so case/whitespace variants share one budget. */
+const accountKey = (email: string) => email.trim().toLowerCase();
+
 export class AuthService {
+  /** Per IP (or per user on authenticated routes) request budget for the other `limit: 'auth'` routes. */
   readonly authLimiter: RateLimiter;
   readonly apiLimiter: RateLimiter;
+  /** Failed sign-ins per client IP. Only failures count, so others' junk can't spend a caller's success. */
+  readonly loginIpLimiter: RateLimiter;
+  /** Per-account (submitted email) escalating lock after repeated failures. */
+  readonly loginLockout: LoginLockout;
+  /** Refresh requests per presented session id (never per IP, so other callers can't spend it). */
+  readonly refreshLimiter: RateLimiter;
+  /** At most one audit row per throttled key per minute, so 429 floods can't flood the audit log. */
+  private readonly throttleAudit = new RateLimiter(1, 60_000);
   /** One-time code required to create the first administrator; null once any user exists. */
   private setupCode: string | null = null;
 
@@ -72,7 +84,33 @@ export class AuthService {
   ) {
     this.authLimiter = new RateLimiter(config.auth.authRateLimit);
     this.apiLimiter = new RateLimiter(config.auth.apiRateLimit);
+    this.loginIpLimiter = new RateLimiter(config.auth.loginIpFailureLimit);
+    this.refreshLimiter = new RateLimiter(config.auth.refreshRateLimit);
+    this.loginLockout = new LoginLockout({
+      threshold: config.auth.loginLockoutThreshold,
+      baseMs: config.auth.loginLockoutBase * 1000,
+      maxMs: Math.max(config.auth.loginLockoutBase, config.auth.loginLockoutMax) * 1000,
+    });
   }
+
+  // ---------- throttling ----------
+
+  /** Counts a request against the `auth` bucket of a route; audits (sparingly) and rethrows a 429. */
+  limitAuthRoute(route: { method: string; pattern: string }, user: AuthUser | null, client: ClientInfo): void {
+    const key = `${route.pattern}|${user ? `user:${user.userId}` : client.ip}`;
+    try {
+      this.authLimiter.hit(key);
+    } catch (e) {
+      this.auditThrottled(key, { action: 'auth.rate_limited', user, method: route.method, path: route.pattern, status: 429, ip: client.ip });
+      throw e;
+    }
+  }
+
+  /** Writes a throttling audit row unless one was already written for `key` in the last minute. */
+  private auditThrottled(key: string, e: AuditInput): void {
+    if (this.throttleAudit.allow(key)) this.audit(e);
+  }
+
 
   // ---------- startup ----------
 
@@ -218,13 +256,60 @@ export class AuthService {
   }
 
   async login(email: string, password: string, client: ClientInfo): Promise<IssuedSession> {
+    const account = accountKey(email);
+    const shownEmail = email.trim().slice(0, 200);
     const user = this.findByEmail(email);
+    const who = user ? toAuthUser(user) : null;
+    const throttled = (key: string, details: string) =>
+      this.auditThrottled(key, { action: 'auth.login_throttled', user: who, path: '/api/auth/login', status: 429, ip: client.ip, details });
+
+    // 1. Per-account lock. Applied to unknown emails exactly the same way, so it doesn't reveal which exist.
+    const lockedMs = this.loginLockout.lockedFor(account);
+    if (lockedMs > 0) {
+      throttled(`lock|${account}`, `Account locked after repeated failures: ${shownEmail}`);
+      const minutes = Math.ceil(lockedMs / 60_000);
+      throw tooManyRequests(
+        lockedMs / 1000,
+        `Too many failed sign-in attempts for this email. Try again in ${minutes} minute${minutes === 1 ? '' : 's'}.`,
+        'LOGIN_LOCKED',
+      );
+    }
+    // 2. Per-IP failure budget (large; a caller's successes never count, so it only bites on mass guessing).
+    const ipKey = `ip|${client.ip}`;
+    try {
+      this.loginIpLimiter.check(ipKey);
+    } catch (e) {
+      throttled(ipKey, `Too many failed sign-ins from this address: ${shownEmail}`);
+      throw e;
+    }
+
+    // Count the attempt as a failure *before* the (slow) hash check so concurrent guesses can't all slip
+    // through before the first one is recorded; a success gives it back.
+    const failure = this.loginLockout.fail(account);
+    this.loginIpLimiter.allow(ipKey);
+
     // Hash even when the user doesn't exist so response time doesn't reveal which emails are registered.
     const ok = await verifyPassword(password, user?.password_hash ?? (await dummyHash()));
     if (!user || !ok) {
-      this.audit({ action: 'auth.login_failed', ip: client.ip, details: email.trim().slice(0, 200) });
+      const streak = failure.failures > 1 ? ` (${failure.failures} consecutive failures)` : '';
+      this.audit({
+        action: 'auth.login_failed',
+        user: who,
+        ip: client.ip,
+        details: user ? `Incorrect password${streak}` : `Unknown email: ${shownEmail}${streak}`,
+      });
+      if (failure.lockMs > 0) {
+        this.audit({
+          action: 'auth.login_locked',
+          user: who,
+          ip: client.ip,
+          details: `${shownEmail} locked for ${Math.round(failure.lockMs / 1000)} s after ${failure.failures} consecutive failures`,
+        });
+      }
       throw unauthorized('Incorrect email or password', 'INVALID_CREDENTIALS');
     }
+    this.loginLockout.succeed(account);
+    this.loginIpLimiter.refund(ipKey);
     this.db.run(`UPDATE app_user SET last_login_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE user_id = ?`, [user.user_id]);
     this.audit({ action: 'auth.login', user: toAuthUser(user), ip: client.ip });
     return this.issue(user, client);
@@ -247,6 +332,17 @@ export class AuthService {
     const [sessionId, secret] = (token ?? '').split('.');
     if (!sessionId || !secret) throw unauthorized('Your session has ended. Sign in again.', 'SESSION_EXPIRED');
     const s = this.db.get<SessionRow>('SELECT * FROM user_session WHERE session_id = ?', [sessionId]);
+    // Throttle per session (only sessions that exist, so random ids can't grow the limiter's memory).
+    if (s) {
+      const key = `refresh|${sessionId}`;
+      try {
+        this.refreshLimiter.hit(key);
+      } catch (e) {
+        const u = this.findById(s.user_id);
+        this.auditThrottled(key, { action: 'auth.rate_limited', user: u ? toAuthUser(u) : null, path: '/api/auth/refresh', status: 429, ip: client.ip });
+        throw e;
+      }
+    }
     const now = nowSeconds();
     if (!s || s.expires_at <= now) {
       if (s) this.db.run('DELETE FROM user_session WHERE session_id = ?', [sessionId]);
