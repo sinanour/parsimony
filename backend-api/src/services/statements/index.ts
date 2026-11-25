@@ -15,6 +15,8 @@ export interface StatementParseOptions {
   accountIdx?: number;
   /** For card statements when no account was chosen: the account whose statement file pattern matched. */
   defaultAccountIdx?: number;
+  /** Parsing stops once more than this many records were found. */
+  maxRecords?: number;
 }
 
 /** Parses a CSV or PDF statement with the statement format its file name selects. Nothing is written. */
@@ -50,8 +52,20 @@ export async function parseStatementFile(db: Db, fileName: string, content: Buff
     rows = readCsv(text);
   }
 
-  const accountForNumber = (n: string) => db.get<{ account_idx: number }>('SELECT account_idx FROM account_num WHERE account_no = ? LIMIT 1', [n])?.account_idx;
-  const result = parseRows(rows, parser!, settings!, { fileName, accountIdx: opts.accountIdx, defaultAccountIdx: opts.defaultAccountIdx, accountForNumber });
+  const byNumber = new Map<string, number | undefined>();
+  const accountForNumber = (n: string) => {
+    if (!byNumber.has(n)) {
+      byNumber.set(n, db.get<{ account_idx: number }>('SELECT account_idx FROM account_num WHERE account_no = ? LIMIT 1', [n])?.account_idx);
+    }
+    return byNumber.get(n);
+  };
+  const result = parseRows(rows, parser!, settings!, {
+    fileName,
+    accountIdx: opts.accountIdx,
+    defaultAccountIdx: opts.defaultAccountIdx,
+    accountForNumber,
+    maxRecords: opts.maxRecords,
+  });
   warnings.push(...result.warnings);
   if (result.records.length === 0 && warnings.length === 0) {
     warnings.push(`No transactions were found in ${fileName}. Check that the file matches the "${format.name}" statement format.`);

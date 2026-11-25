@@ -171,7 +171,9 @@ disabled unless both SMTP and `PUBLIC_URL` are configured. The mail is sent asyn
 time doesn't reveal whether an account exists.
 
 **Rate limits** — per `route.pattern + client IP` for routes marked `limit: 'auth'` (sign-in, setup,
-refresh, logout, password endpoints), and per user for everything else. The client IP is `X-Real-IP`
+refresh, logout, password endpoints), and per user for everything else. Routes marked `limit: 'heavy'`
+(statement parse and commit, rule runs and dry runs, statement-format writes) also count against a much
+smaller per-user budget. The client IP is `X-Real-IP`
 (set by nginx) when `TRUST_PROXY=true`, otherwise the socket address.
 
 ### 2.5 Rule engine
@@ -187,7 +189,11 @@ WHERE category IS NULL AND description LIKE ? AND amount >= ? AND amount <= ?
 The filter is wrapped as `%filter%` unless it already contains `%` or `_`. Missing bounds become
 ±2,000,000,000. The comment is `Automatic Rule (<UTC timestamp>): Category = …, exemption = … where
 <predicate with values inlined>`. A dry run executes the same statements inside a transaction and rolls
-back, which gives exact first-match-wins counts. An optional test checks byte-for-byte parity with the
+back, which gives exact first-match-wins counts. Each `UPDATE … RETURNING expense_idx` is the rule's only
+pass over the data (the partial index `expense_uncategorized_IDX` limits it to uncategorized rows); the
+drill-down list is read back by id. A scope may hold at most `RULES_MAX_PER_SCOPE` rules (default 2,000):
+creating one more is refused, and a run over a scope that already holds more is refused rather than half
+applied. Runs and dry runs draw on the per-user `heavy` rate limit. An optional test checks byte-for-byte parity with the
 original Python categorizer (`LEGACY_CATEGORIZER` + `PARITY_DB`).
 
 ### 2.6 Statement import
@@ -228,7 +234,21 @@ span a year end; and the period line itself is never read as a transaction.
 
 Duplicate detection: an expense is a duplicate if a row with the same account, date, amount (to the
 cent) and description exists, counting multiplicity. Deposits match on account, date and amount. An
-"already has rows in this date range" warning is also given per account.
+"already has rows in this date range" warning is also given per account. Both are computed with one query
+per record type for the whole statement (the distinct keys are passed as a JSON array), not per record.
+
+**Bounds.** One request can only do a bounded amount of work, because the server is a single thread:
+
+* A parse producing more than `IMPORT_MAX_RECORDS` records (default 10,000; years of one account) is
+  refused with 413 `TOO_MANY_RECORDS`, and parsing stops as soon as the cap is passed. A commit with more
+  records than that is refused the same way before any record is validated.
+* Date formats: every directive (except `%%`) may appear once, as in Python. Together with the anchored
+  pattern and bounded-width fields, this keeps the number of ways a cell can be split small and constant,
+  so no format can backtrack exponentially (the pentest's `%Y` + 29 × `%H` + `Z` took 15 s on a 62-character
+  cell). Date cells longer than 40 characters are rejected before any matching. A stored format that no
+  longer compiles (saved before this rule) is skipped with a warning, never run.
+* Parse, commit, rule runs (including dry runs) and statement-format writes share a per-user `heavy` rate
+  limit (`HEAVY_RATE_LIMIT_PER_MINUTE`, default 30) on top of the general per-user limit.
 
 ### 2.7 Migrations
 
@@ -242,6 +262,8 @@ cent) and description exists, counting multiplicity. Deposits match on account, 
 * `004_user_id_autoincrement.sql` — rebuilds `app_user` with `AUTOINCREMENT` ids (never reused).
 * `005_revocation_ms.sql` — adds `app_user.revoked_at_ms` and `user_session.created_ms` (converted from
   the existing second/ISO values) and drops sessions that are orphaned or not after their revocation.
+* `006_uncategorized_expense_index.sql` — partial index `expense_uncategorized_IDX` on
+  `expense(account_idx) WHERE category IS NULL`, so rule runs and match counts only visit uncategorized rows.
 
 New migrations are new files; applied files are never edited. Rolling back a deployment doesn't undo
 migrations, so migrations must stay additive: older code must keep working on the newer schema.

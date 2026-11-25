@@ -57,6 +57,7 @@ export async function startApp(opts: { seed?: boolean; overrides?: Overrides } =
       adminPassword: seed ? ADMIN.password : '',
       authRateLimit: 1000,
       apiRateLimit: 0,
+      heavyRateLimit: 0,
       ...opts.overrides?.auth,
     },
   };

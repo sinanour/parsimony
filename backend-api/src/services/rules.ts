@@ -1,6 +1,7 @@
 // Port of expense_categorizer.py. Semantics and the comment format written to expense.comment are kept
 // identical so rows categorized by the app and by the legacy script are indistinguishable.
 import type { Db } from '../db';
+import { badRequest } from '../http';
 import type { Rule, RuleInput, RuleMatch, RulePreview, RuleRunResponse, RuleRunResult } from '../../../shared/types';
 
 export const AMOUNT_FLOOR = -2000000000;
@@ -88,45 +89,60 @@ export function inlinedPredicate(c: CompiledRule): string {
 const RULE_COLUMNS =
   'expense_categorization_rule_idx, description_filter, minimum_amount, maximum_amount, category, exemption, is_corporate';
 
-export function fetchRules(db: Db, isCorporate: boolean): RuleRow[] {
+export function fetchRules(db: Db, isCorporate: boolean, limit = -1): RuleRow[] {
   return db.all<RuleRow>(
-    `SELECT ${RULE_COLUMNS} FROM expense_categorization_rule WHERE is_corporate = ? ORDER BY expense_categorization_rule_idx`,
-    [isCorporate ? 1 : 0],
+    `SELECT ${RULE_COLUMNS} FROM expense_categorization_rule WHERE is_corporate = ? ORDER BY expense_categorization_rule_idx LIMIT ?`,
+    [isCorporate ? 1 : 0, limit],
   );
 }
 
 const MATCH_SELECT = `SELECT e.expense_idx AS expenseIdx, e.transaction_date AS transactionDate, e.description,
   e.amount, a.name AS accountName FROM expense e JOIN account a USING (account_idx)`;
 
-export function runRules(db: Db, isCorporate: boolean, dryRun: boolean, matchLimit = 500): RuleRunResponse {
+/** Default cap on rules evaluated per scope (overridden by RULES_MAX_PER_SCOPE). */
+export const DEFAULT_MAX_RULES = 2000;
+
+export const countRules = (db: Db, isCorporate: boolean): number =>
+  db.scalar<number>('SELECT COUNT(*) FROM expense_categorization_rule WHERE is_corporate = ?', [isCorporate ? 1 : 0]);
+
+/**
+ * Runs every rule of a scope in index order inside one transaction (a dry run rolls it back).
+ *
+ * Each rule costs one pass over the scope's uncategorized expenses (the partial index
+ * expense_uncategorized_IDX keeps categorized rows out of it): the UPDATE returns the rows it changed, and
+ * the drill-down list is read back by id. A scope with more than `maxRules` rules is refused rather than
+ * partially applied.
+ */
+export function runRules(db: Db, isCorporate: boolean, dryRun: boolean, matchLimit = 500, maxRules = DEFAULT_MAX_RULES): RuleRunResponse {
   const now = utcTimestamp();
   const results: RuleRunResult[] = [];
   const rollback = new Error('dry-run rollback');
 
   try {
     db.tx(() => {
-      for (const rule of fetchRules(db, isCorporate)) {
+      const rules = fetchRules(db, isCorporate, maxRules + 1);
+      if (rules.length > maxRules) {
+        throw badRequest(`This scope has more than ${maxRules} rules; delete some before running them.`);
+      }
+      const update = db.raw.prepare(
+        `UPDATE expense SET category = ?, exemption = ?, comment = ? WHERE ${RULE_PREDICATE} RETURNING expense_idx AS id`,
+      );
+      const matchesOf = db.raw.prepare(
+        `${MATCH_SELECT} WHERE e.expense_idx IN (SELECT value FROM json_each(?))
+         ORDER BY e.transaction_date DESC LIMIT ${matchLimit}`,
+      );
+      for (const rule of rules) {
         const c = compileRule(rule);
-        const matches = db.all<RuleMatch>(
-          `${MATCH_SELECT} WHERE e.expense_idx IN (SELECT expense_idx FROM expense WHERE ${RULE_PREDICATE})
-           ORDER BY e.transaction_date DESC LIMIT ${matchLimit}`,
-          c.bindValues,
-        );
-        const r = db.run(`UPDATE expense SET category = ?, exemption = ?, comment = ? WHERE ${RULE_PREDICATE}`, [
-          rule.category,
-          rule.exemption,
-          ruleComment(c, now),
-          ...c.bindValues,
-        ]);
-        if (r.changes > 0) {
+        const changed = update.all(rule.category, rule.exemption, ruleComment(c, now), ...c.bindValues) as { id: number }[];
+        if (changed.length > 0) {
           results.push({
             ruleIdx: rule.expense_categorization_rule_idx,
             descriptionFilter: rule.description_filter,
             category: rule.category,
             exemption: rule.exemption,
-            rowCount: r.changes,
+            rowCount: changed.length,
             predicate: inlinedPredicate(c),
-            matches,
+            matches: matchesOf.all(JSON.stringify(changed.map((r) => r.id))) as unknown as RuleMatch[],
           });
         }
       }
@@ -161,6 +177,11 @@ export function matchCounts(db: Db): Map<number, number> {
      GROUP BY 1`,
   );
   return new Map(rows.map((r) => [r.idx, r.n]));
+}
+
+/** One rule's match count against currently uncategorized expenses (what matchCounts reports for it). */
+export function matchCount(db: Db, rule: RuleRow): number {
+  return db.scalar<number>(`SELECT COUNT(*) FROM expense WHERE ${RULE_PREDICATE}`, compileRule(rule).bindValues);
 }
 
 export function previewRule(db: Db, input: Pick<RuleInput, 'descriptionFilter' | 'minimumAmount' | 'maximumAmount' | 'isCorporate'>, limit = 200): RulePreview {

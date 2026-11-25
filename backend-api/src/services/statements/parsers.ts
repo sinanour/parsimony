@@ -1,5 +1,5 @@
 import type { StatementColumns, StatementFormatSettings, StatementParserKind } from '../../../../shared/types';
-import { capwords, isoDate, pyFloat, strptime } from './python-compat';
+import { capwords, compileDateFormat, isoDate, pyFloat, strptime } from './python-compat';
 
 export interface ParsedRecord {
   type: 'expense' | 'deposit';
@@ -19,6 +19,8 @@ export interface RowParseContext {
   defaultAccountIdx?: number;
   /** Looks up an account by one of its numbers (bank statements). */
   accountForNumber(accountNumber: string): number | undefined;
+  /** Stop once more than this many records were produced (the caller rejects the file). */
+  maxRecords?: number;
 }
 
 export interface RowParseResult {
@@ -85,6 +87,17 @@ export function parseRows(rows: string[][], parser: StatementParserKind, setting
   if (rows.length < settings.headerRows + (settings.columnCount === null ? 1 : 0)) {
     return { records, warnings: [`${ctx.fileName} is empty or has fewer rows than the format's header.`] };
   }
+  // Formats saved before the validator rejected them (e.g. a repeated directive) are skipped, never run.
+  const dateFormats = settings.dateFormats.filter((f) => {
+    try {
+      compileDateFormat(f);
+      return true;
+    } catch (e) {
+      warnings.push(`${ctx.fileName}: the date format "${f}" is ignored: ${(e as Error).message}.`);
+      return false;
+    }
+  });
+  if (dateFormats.length === 0) return { records, warnings };
   let body = rows.slice(settings.headerRows);
   let columns = settings.columns;
   let columnCount = settings.columnCount;
@@ -100,6 +113,7 @@ export function parseRows(rows: string[][], parser: StatementParserKind, setting
   }
 
   const cell = (row: string[], i: number | null) => (i === null ? undefined : row[i]);
+  const limit = ctx.maxRecords ?? Infinity;
 
   if (parser === 'card') {
     const accountIdx = ctx.accountIdx ?? ctx.defaultAccountIdx;
@@ -107,8 +121,9 @@ export function parseRows(rows: string[][], parser: StatementParserKind, setting
       return { records, warnings: [`No account for ${ctx.fileName}: choose the account when importing, or set a statement file pattern on the account.`] };
     }
     for (const row of body) {
+      if (records.length > limit) break;
       if (row.length !== columnCount) continue;
-      const date = parseDate(cell(row, columns.date), settings.dateFormats);
+      const date = parseDate(cell(row, columns.date), dateFormats);
       const description = capwords(cell(row, columns.description) ?? '');
       let amount = currency(cell(row, columns.debit));
       if (amount === null && columns.credit !== columns.debit) {
@@ -125,8 +140,9 @@ export function parseRows(rows: string[][], parser: StatementParserKind, setting
 
   const unknownNumbers = new Set<string>();
   for (const row of body) {
+    if (records.length > limit) break;
     if (row.length !== columnCount) continue;
-    const date = parseDate(cell(row, columns.date), settings.dateFormats);
+    const date = parseDate(cell(row, columns.date), dateFormats);
     if (date === null) continue;
     let accountIdx = ctx.accountIdx;
     if (accountIdx === undefined) {

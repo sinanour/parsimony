@@ -23,6 +23,12 @@ function int(name: string, fallback: number): number {
   return n;
 }
 
+function positiveInt(name: string, fallback: number): number {
+  const n = int(name, fallback);
+  if (n === 0) throw new Error(`${name} must be a positive integer`);
+  return n;
+}
+
 /** Parses durations like "900", "15m", "12h", "7d" into seconds. */
 export function parseDuration(name: string, value: string): number {
   const m = /^(\d+)\s*([smhd]?)$/.exec(value.trim());
@@ -70,6 +76,8 @@ export function loadConfig() {
       /** Refresh requests per session per minute. */
       refreshRateLimit: int('REFRESH_RATE_LIMIT_PER_MINUTE', 30),
       apiRateLimit: int('API_RATE_LIMIT_PER_MINUTE', 600),
+      /** Expensive requests (rule runs and dry runs, statement parse and commit, statement-format writes) per user per minute. */
+      heavyRateLimit: int('HEAVY_RATE_LIMIT_PER_MINUTE', 30),
       auditRetentionDays: int('AUDIT_RETENTION_DAYS', 365),
       adminEmail: env('ADMIN_EMAIL', ''),
       adminPassword: env('ADMIN_PASSWORD', ''),
@@ -85,6 +93,12 @@ export function loadConfig() {
         }
       : null,
     publicUrl: env('PUBLIC_URL', '').replace(/\/+$/, ''),
+    limits: {
+      /** Records one statement parse may produce, and records one import commit may insert. */
+      importMaxRecords: positiveInt('IMPORT_MAX_RECORDS', 10_000),
+      /** Categorization rules per scope (personal / business); a rule run evaluates at most this many. */
+      maxRulesPerScope: positiveInt('RULES_MAX_PER_SCOPE', 2_000),
+    },
   };
 }
 

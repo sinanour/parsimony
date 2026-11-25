@@ -1,6 +1,6 @@
 import path from 'node:path';
 import type { Db } from '../db';
-import { badRequest } from '../http';
+import { badRequest, payloadTooLarge } from '../http';
 import type { ImportCommitRequest, ImportParseResponse, ImportRecord } from '../../../shared/types';
 import { parseStatementFile } from './statements';
 
@@ -21,7 +21,16 @@ export function accountForFileName(db: Db, fileName: string): number | undefined
   return match?.account_idx;
 }
 
-export async function parseStatement(db: Db, fileName: string, content: Buffer, accountIdx?: number): Promise<ImportParseResponse> {
+/** Default for IMPORT_MAX_RECORDS: comfortably more than years of one account's transactions in one file. */
+export const DEFAULT_IMPORT_MAX_RECORDS = 10_000;
+
+export async function parseStatement(
+  db: Db,
+  fileName: string,
+  content: Buffer,
+  accountIdx?: number,
+  maxRecords = DEFAULT_IMPORT_MAX_RECORDS,
+): Promise<ImportParseResponse> {
   const base = path.basename(fileName);
   if (!/\.(csv|pdf)$/i.test(base)) throw badRequest('Only .csv and .pdf statements are supported');
   if (content.length === 0) throw badRequest('The uploaded file is empty');
@@ -29,7 +38,14 @@ export async function parseStatement(db: Db, fileName: string, content: Buffer, 
   const parsed = await parseStatementFile(db, base, content, {
     accountIdx,
     defaultAccountIdx: accountIdx === undefined ? accountForFileName(db, base) : undefined,
+    maxRecords,
   });
+  if (parsed.records.length > maxRecords) {
+    throw payloadTooLarge(
+      `${base} has more than ${maxRecords} transactions, more than one import can take. Split the file and import the parts separately.`,
+      'TOO_MANY_RECORDS',
+    );
+  }
   const accountNames = new Map(
     db.all<{ account_idx: number; name: string }>('SELECT account_idx, name FROM account').map((a) => [a.account_idx, a.name]),
   );
@@ -68,20 +84,32 @@ export function flagDuplicates(db: Db, records: ImportRecord[]): void {
     g.push(r);
     groups.set(k, g);
   }
-  for (const g of groups.values()) {
-    const r = g[0];
-    const existing =
-      r.type === 'expense'
-        ? db.scalar<number>(
-            `SELECT COUNT(*) FROM expense WHERE account_idx = ? AND transaction_date = ? AND ROUND(amount, 2) = ? AND lower(description) = lower(?)`,
-            [r.accountIdx, r.transactionDate, r.amount, r.description],
-          )
-        : db.scalar<number>(
-            `SELECT COUNT(*) FROM deposit WHERE account_idx = ? AND transaction_date = ? AND ROUND(amount, 2) = ?`,
-            [r.accountIdx, r.transactionDate, r.amount],
-          );
-    g.slice(0, existing).forEach((x) => (x.isDuplicate = true));
-  }
+  // One query per record type for all groups at once (the statement's keys arrive as a JSON array), rather
+  // than one query per group.
+  const list = [...groups.values()];
+  const keysOf = (type: 'expense' | 'deposit') =>
+    JSON.stringify(
+      list.flatMap((g, i) => (g[0].type === type ? [[i, g[0].accountIdx, g[0].transactionDate, g[0].amount, g[0].description]] : [])),
+    );
+  const KEYS = `k AS (SELECT json_extract(value, '$[0]') AS i, json_extract(value, '$[1]') AS account_idx,
+      json_extract(value, '$[2]') AS transaction_date, json_extract(value, '$[3]') AS amount,
+      json_extract(value, '$[4]') AS description FROM json_each(?))`;
+  const counts = [
+    ...db.all<{ i: number; n: number }>(
+      `WITH ${KEYS} SELECT k.i, COUNT(x.expense_idx) AS n FROM k LEFT JOIN expense x
+         ON x.account_idx = k.account_idx AND x.transaction_date = k.transaction_date
+        AND ROUND(x.amount, 2) = k.amount AND lower(x.description) = lower(k.description)
+       GROUP BY k.i`,
+      [keysOf('expense')],
+    ),
+    ...db.all<{ i: number; n: number }>(
+      `WITH ${KEYS} SELECT k.i, COUNT(x.deposit_idx) AS n FROM k LEFT JOIN deposit x
+         ON x.account_idx = k.account_idx AND x.transaction_date = k.transaction_date AND ROUND(x.amount, 2) = k.amount
+       GROUP BY k.i`,
+      [keysOf('deposit')],
+    ),
+  ];
+  for (const { i, n } of counts) list[i].slice(0, n).forEach((x) => (x.isDuplicate = true));
 }
 
 /** The legacy script's signal: rows already present in the statement's date range for the account. */
@@ -116,22 +144,19 @@ export function commitRecords(db: Db, records: ImportCommitRequest['records']): 
   let depositsInserted = 0;
   db.tx(() => {
     const known = new Set(db.all<{ account_idx: number }>('SELECT account_idx FROM account').map((a) => a.account_idx));
+    const insertExpense = db.raw.prepare(
+      'INSERT INTO expense (transaction_date, category, exemption, description, amount, account_idx) VALUES (?, ?, ?, ?, ?, ?)',
+    );
+    const insertDeposit = db.raw.prepare(
+      'INSERT INTO deposit (transaction_date, description, amount, income_amount, account_idx) VALUES (?, ?, ?, ?, ?)',
+    );
     for (const r of records) {
       if (!known.has(r.accountIdx)) throw badRequest(`Unknown account #${r.accountIdx}`);
       if (r.type === 'expense') {
-        db.run(
-          'INSERT INTO expense (transaction_date, category, exemption, description, amount, account_idx) VALUES (?, ?, ?, ?, ?, ?)',
-          [r.transactionDate, r.category || null, r.exemption, r.description, round2(r.amount), r.accountIdx],
-        );
+        insertExpense.run(r.transactionDate, r.category || null, r.exemption, r.description, round2(r.amount), r.accountIdx);
         expensesInserted++;
       } else {
-        db.run('INSERT INTO deposit (transaction_date, description, amount, income_amount, account_idx) VALUES (?, ?, ?, ?, ?)', [
-          r.transactionDate,
-          r.description,
-          round2(r.amount),
-          round2(r.incomeAmount ?? 0),
-          r.accountIdx,
-        ]);
+        insertDeposit.run(r.transactionDate, r.description, round2(r.amount), round2(r.incomeAmount ?? 0), r.accountIdx);
         depositsInserted++;
       }
     }

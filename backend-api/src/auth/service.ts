@@ -82,6 +82,8 @@ export class AuthService {
   /** Per IP (or per user on authenticated routes) request budget for the other `limit: 'auth'` routes. */
   readonly authLimiter: RateLimiter;
   readonly apiLimiter: RateLimiter;
+  /** Per user: rule runs, statement parse/commit and statement-format writes. */
+  readonly heavyLimiter: RateLimiter;
   /** Failed sign-ins per client IP. Only failures count, so others' junk can't spend a caller's success. */
   readonly loginIpLimiter: RateLimiter;
   /** Per-account (submitted email) escalating lock after repeated failures. */
@@ -109,6 +111,7 @@ export class AuthService {
   ) {
     this.authLimiter = new RateLimiter(config.auth.authRateLimit);
     this.apiLimiter = new RateLimiter(config.auth.apiRateLimit);
+    this.heavyLimiter = new RateLimiter(config.auth.heavyRateLimit);
     this.loginIpLimiter = new RateLimiter(config.auth.loginIpFailureLimit);
     this.refreshLimiter = new RateLimiter(config.auth.refreshRateLimit);
     this.loginLockout = new LoginLockout({

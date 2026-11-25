@@ -79,6 +79,9 @@ Settings come from environment variables. For local runs, put them in `.env` at 
 | `JWT_SECRET` | generated | ≥ 32 characters; otherwise generated into `DATA_DIR/jwt-secret` |
 | `ACCESS_TOKEN_TTL` / `REFRESH_TOKEN_TTL` | `15m` / `7d` | |
 | `SMTP_*`, `PUBLIC_URL` | — | Enables "Forgot password?" (both are required). `PUBLIC_URL` is also always accepted as the app's own origin by the cross-site check |
+| `HEAVY_RATE_LIMIT_PER_MINUTE` | `30` | Per user: statement parse/commit, rule runs and dry runs, statement-format saves |
+| `IMPORT_MAX_RECORDS` | `10000` | Most records one statement parse or import commit may hold |
+| `RULES_MAX_PER_SCOPE` | `2000` | Most categorization rules per scope (personal / business) |
 | `TRUST_PROXY` | `false` | Set `true` only behind a reverse proxy that sets `X-Real-IP` / `X-Forwarded-Proto` / `X-Forwarded-Host` |
 
 ## Users and roles

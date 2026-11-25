@@ -34,13 +34,29 @@ const DIRECTIVES: Record<string, string> = {
 /** The directives a date format may use, for validation messages. */
 export const DATE_DIRECTIVES = Object.keys(DIRECTIVES).filter((k) => k !== '%');
 
-const compiled = new Map<string, RegExp>();
+/**
+ * Longest date cell matched. Real dates (even "Wed, September 30, 2026 23:59:59 pm", 34) are shorter;
+ * longer cells are rejected before any regex runs, which bounds the work a single cell can cause.
+ */
+export const MAX_DATE_LENGTH = 40;
 
-/** Compiles a strptime format the way CPython does; throws on an unknown directive. */
+const compiled = new Map<string, RegExp>();
+const MAX_COMPILED = 256;
+
+/**
+ * Compiles a strptime format the way CPython does; throws on an unknown or repeated directive.
+ *
+ * Every directive (except `%%`) may appear at most once, as in Python, where each one is a named group.
+ * That is also what keeps matching cheap: the pattern is anchored, each field has at most a handful of
+ * alternatives (all of bounded width), and `\s+` runs are never adjacent, so the number of ways a cell can
+ * be split is bounded by a small constant whatever the cell holds — no format can backtrack exponentially
+ * (e.g. `%Y` followed by 29 `%H`, which alone would take seconds on a 62-character cell).
+ */
 export function compileDateFormat(format: string): RegExp {
   let re = compiled.get(format);
   if (re) return re;
   let src = '';
+  const seen = new Set<string>();
   for (let i = 0; i < format.length; i++) {
     const c = format[i];
     if (c === '%') {
@@ -48,7 +64,10 @@ export function compileDateFormat(format: string): RegExp {
       const part = directive === undefined ? undefined : DIRECTIVES[directive];
       if (part === undefined) throw new Error(`"%${directive ?? ''}" is not a supported date directive`);
       // A directive may appear once (Python raises on redefined groups).
-      if (part.startsWith('(?<') && src.includes(part.slice(0, 5))) throw new Error(`"%${directive}" appears twice`);
+      if (directive !== '%') {
+        if (seen.has(directive)) throw new Error(`"%${directive}" appears twice`);
+        seen.add(directive);
+      }
       src += part;
     } else if (/\s/.test(c)) {
       while (i + 1 < format.length && /\s/.test(format[i + 1])) i++;
@@ -58,6 +77,7 @@ export function compileDateFormat(format: string): RegExp {
     }
   }
   re = new RegExp(`^(?:${src})`, 'i');
+  if (compiled.size >= MAX_COMPILED) compiled.clear();
   compiled.set(format, re);
   return re;
 }
@@ -66,6 +86,7 @@ const daysInMonth = (y: number, m: number) => new Date(Date.UTC(y, m, 0)).getUTC
 
 /** `datetime.strptime(value, format).date()`, or null where Python would raise. */
 export function strptime(value: string, format: string): PyDate | null {
+  if (value.length > MAX_DATE_LENGTH) return null;
   const m = compileDateFormat(format).exec(value);
   if (!m || m[0].length !== value.length) return null;
   const g = m.groups ?? {};

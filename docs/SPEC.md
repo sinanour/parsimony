@@ -105,7 +105,7 @@ is a separate package because only operators need it.
 ### 5.6 Categorization rules
 * R1 — List rules for the selected scope, with the number of uncategorized expenses each would match.
 * R2 — Create / edit / delete rules. The editor shows a live preview of matching uncategorized expenses.
-* R3 — Run rules: a dry run shows, per rule, how many rows it would categorize (first match wins) and lets the user drill into them. *Apply* performs the update in one transaction and writes an `Automatic Rule (…)` comment on each row.
+* R3 — Run rules: a dry run shows, per rule, how many rows it would categorize (first match wins) and lets the user drill into them. *Apply* performs the update in one transaction and writes an `Automatic Rule (…)` comment on each row. Read-only users may dry-run ("Preview rules") but not apply. A scope holds at most `RULES_MAX_PER_SCOPE` rules (default 2,000).
 * R4 — Rule semantics: LIKE wrapping, inclusive min/max, scope by `account.is_corporate`, ordering by index, `category IS NULL`. A cleared category is always stored as NULL, never `''`.
 
 ### 5.7 Statement import
@@ -117,11 +117,12 @@ is a separate package because only operators need it.
   If none of these yields an account, the file produces a warning asking the user to pick one.
 * I3 — Preview every parsed record with account, date, description, amount and type. Records that already exist (same account, date, amount and description, counting multiplicity) are flagged as duplicates and unselected by default. Parser warnings (e.g. totals that don't reconcile) are shown prominently.
 * I4 — Commit selected records in one transaction, optionally running categorization rules afterwards.
+* I5 — One statement parse may yield, and one commit may insert, at most `IMPORT_MAX_RECORDS` records (default 10,000); larger files or batches are refused (413 `TOO_MANY_RECORDS`) and must be split.
 
 ### 5.8 Statement formats
 * F1 — List formats with name, file-name pattern, file type, statement kind, column mapping, date formats and status; filter by text and file type. Editors and administrators manage them; the page is hidden from read-only users, like Import.
 * F2 — Create, edit, duplicate, deactivate and delete formats. A pattern can be used once per file type.
-* F3 — **CSV formats** are entirely data: statement kind (*credit card*: one account per file, credits are refunds, card payments skipped; *bank account*: an account number on each row, money in is a deposit), rows to skip, and either fixed column positions with a column count or column titles read from a header row, plus date formats tried in order. A sample file can be previewed in the editor with numbered columns; it never leaves the browser.
+* F3 — **CSV formats** are entirely data: statement kind (*credit card*: one account per file, credits are refunds, card payments skipped; *bank account*: an account number on each row, money in is a deposit), rows to skip, and either fixed column positions with a column count or column titles read from a header row, plus date formats tried in order (Python `strptime` directives, each at most once per format; date cells longer than 40 characters never match). A sample file can be previewed in the editor with numbered columns; it never leaves the browser.
 * F4 — **PDF formats** pick one of the built-in PDF layouts (RBC bank account statement, RBC Visa statement). Layouts are code because they locate periods, account numbers and totals; a statement whose transactions don't add up to its totals produces a warning.
 * F5 — The built-in formats are seeded by a migration and can be edited like any other.
 
@@ -170,7 +171,7 @@ is a separate package because only operators need it.
   * Sign-in: after 5 consecutive failures for an email (registered or not, so a lock reveals nothing) it is locked for 1 minute, doubling with each further failure up to 15 minutes; a successful sign-in clears the streak. Separately, each client IP may fail at most 100 sign-ins per minute; successful sign-ins never count. Failed sign-ins for a registered email are audited against that user.
   * Refresh: limited per session (default 30/minute); requests without the refresh cookie are rejected before any limit is counted. Sign-out is not rate-limited.
   * Setup and password-reset endpoints: per client IP (default 10 requests/minute); password change: per user.
-  * Other API calls are rate-limited per user (default 600/minute).
+  * Other API calls are rate-limited per user (default 600/minute). Expensive ones — statement parse and commit, rule runs and dry runs, statement-format writes — also share a smaller per-user budget (default 30/minute).
 * U17 — The audit log records sign-in success and failure, sign-out, password changes and resets, user administration, and every data-changing request (user, method, path, status, IP, time). Administrators can browse it in the UI. Entries older than `AUDIT_RETENTION_DAYS` (default 365) are pruned at startup.
 
 ## 7. Non-functional requirements

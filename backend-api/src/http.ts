@@ -20,6 +20,7 @@ export const notFound = (what: string) => new HttpError(404, `${what} not found`
 export const badRequest = (msg: string, details?: unknown) => new HttpError(400, msg, details, 'BAD_REQUEST');
 export const conflict = (msg: string) => new HttpError(409, msg, undefined, 'CONFLICT');
 export const unauthorized = (msg = 'Sign in to continue', code = 'UNAUTHORIZED') => new HttpError(401, msg, undefined, code);
+export const payloadTooLarge = (msg: string, code = 'PAYLOAD_TOO_LARGE') => new HttpError(413, msg, undefined, code);
 export const forbidden = (msg = 'Your role does not allow this action') => new HttpError(403, msg, undefined, 'FORBIDDEN');
 
 /**
@@ -75,8 +76,10 @@ export interface RouteOptions {
   /**
    * Rate-limit bucket. `auth` routes are limited per route and IP (per user when signed in); others per user.
    * Public routes left on `api` are not limited by the router and must throttle themselves (login, refresh).
+   * `heavy` routes (work proportional to the data or the upload) count against the `api` budget and a much
+   * smaller per-user budget of their own.
    */
-  limit?: 'auth' | 'api';
+  limit?: RateLimitBucket;
 }
 
 export interface Route {
@@ -88,8 +91,10 @@ export interface Route {
   raw: boolean;
   access: Access;
   audit: boolean;
-  limit: 'auth' | 'api';
+  limit: RateLimitBucket;
 }
+
+export type RateLimitBucket = 'auth' | 'api' | 'heavy';
 
 /** Cross-cutting concerns the router delegates to the auth layer. */
 export interface Guard {
@@ -320,7 +325,7 @@ function readBody(req: IncomingMessage, limit: number): Promise<Buffer> {
     req.on('data', (c: Buffer) => {
       size += c.length;
       if (size > limit) {
-        reject(new HttpError(413, 'Request body too large', undefined, 'PAYLOAD_TOO_LARGE'));
+        reject(payloadTooLarge('Request body too large'));
         req.destroy();
         return;
       }

@@ -71,7 +71,10 @@ export async function createApp(config: Config, opts: AppOptions = {}): Promise<
     authenticate: (req) => auth.authenticate(req),
     rateLimit: (route: Route, ctx: Ctx) => {
       if (route.limit === 'auth') auth.limitAuthRoute(route, ctx.user, { ip: ctx.ip });
-      else if (ctx.user) auth.apiLimiter.hit(`user:${ctx.user.userId}`);
+      else if (ctx.user) {
+        auth.apiLimiter.hit(`user:${ctx.user.userId}`);
+        if (route.limit === 'heavy') auth.heavyLimiter.hit(`user:${ctx.user.userId}`);
+      }
     },
     audit: (route: Route, ctx: Ctx, status: number) =>
       auth.audit({ action: 'api.write', user: ctx.user, method: route.method, path: new URL(ctx.req.url ?? '/', 'http://x').pathname, status, ip: ctx.ip }),
