@@ -63,7 +63,7 @@ is a separate package because only operators need it.
 | Categorization rule | `expense_categorization_rule` | `description_filter` is a SQL LIKE pattern, wrapped in `%…%` unless it already contains `%`/`_`. Optional inclusive `minimum_amount`/`maximum_amount`. Sets `category` + `exemption`, scoped to personal or business accounts. Rules apply in ascending index order, and the first match wins. |
 | Huqúqu'lláh period | `huquq_date_range` | Single row. Drives `vw_huquq_*` and `vw_expense_summary_for_date_range` (19% of income less exemptions). |
 | Business (corporate) period | `corporate_date_range` | Single row. Drives `vw_corporate_transactions_for_date_range` (accountant export). |
-| User | `app_user` | Email (unique, case-insensitive), display name, password hash, role, `tokens_invalid_before`, timestamps. |
+| User | `app_user` | Email (unique, case-insensitive), display name, password hash, role, `tokens_invalid_before`, timestamps. User ids are never reused after a deletion. |
 | Session | `user_session` | One row per signed-in browser: hashed refresh token, expiry, last use, IP and user agent. |
 | Audit entry | `audit_log` | Who did what and when: auth events, user administration and every data-changing API call. |
 | Schema version | `schema_migrations` | Migrations that have been applied. |
@@ -142,7 +142,7 @@ is a separate package because only operators need it.
 | `READ_ONLY` | ✓ (account numbers masked) | — | — |
 
 * U1 — The server enforces roles on every endpoint. The UI hides or disables actions the user's role doesn't allow. That is a convenience only; the server is what enforces access.
-* U2 — There is always at least one administrator. The API refuses to delete or demote the last one.
+* U2 — There is always at least one administrator. The API refuses to delete or demote the last one, including when several such changes are made at the same time.
 
 ### 6.2 First run
 * U3 — If no users exist at startup and `ADMIN_EMAIL` + `ADMIN_PASSWORD` are set, that administrator is created. The variables are ignored once any user exists.
@@ -155,6 +155,7 @@ is a separate package because only operators need it.
 * U8 — The page silently refreshes the access token before it expires and after a reload. If a refresh token is presented that has already been rotated away (possible theft), the whole session is revoked.
 * U9 — Sign out revokes the current session. "Sign out everywhere" revokes all of the user's sessions and invalidates their outstanding access tokens.
 * U10 — Changing a password, changing a role, or an administrator resetting a password revokes all of that user's sessions.
+* U10a — Concurrent changes to one user's credentials take effect in the order they were made: an administrator's "sign out all sessions", password reset or deletion always wins over a password change that was already in progress (the session that change handed out is revoked too), and a change never lands on a different account.
 * U11 — Every authenticated request re-checks that the user still exists and that the token was issued after the user's `tokens_invalid_before`.
 
 ### 6.4 Password management

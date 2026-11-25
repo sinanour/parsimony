@@ -108,8 +108,8 @@ export const authRoutes: RouteModule = (r, deps) => {
 
   r.post(
     '/api/auth/logout-all',
-    (ctx) => {
-      auth.revokeAll(ctx.user!.userId);
+    async (ctx) => {
+      await auth.revokeSessions(ctx.user!.userId);
       auth.audit({ action: 'auth.logout_all', user: ctx.user, ip: ctx.ip });
       setRefreshCookie(ctx, deps, null);
     },
@@ -190,10 +190,10 @@ export const authRoutes: RouteModule = (r, deps) => {
 
   r.post(
     '/api/users/:id/revoke-sessions',
-    (ctx) => {
+    async (ctx) => {
       const id = idParam.parse(ctx.params.id);
-      const u = auth.getUser(id);
-      auth.revokeAll(id);
+      // Waits for any password change in flight for this user, so its fresh session is revoked too.
+      const u = await auth.revokeSessions(id);
       auth.audit({ action: 'user.revoke_sessions', user: ctx.user, ip: ctx.ip, details: u.email });
     },
     admin,
@@ -201,10 +201,9 @@ export const authRoutes: RouteModule = (r, deps) => {
 
   r.delete(
     '/api/users/:id',
-    (ctx) => {
+    async (ctx) => {
       const id = idParam.parse(ctx.params.id);
-      const u = auth.getUser(id);
-      auth.deleteUser(id, ctx.user!.userId);
+      const u = await auth.deleteUser(id, ctx.user!.userId);
       auth.audit({ action: 'user.delete', user: ctx.user, ip: ctx.ip, details: u.email });
     },
     admin,

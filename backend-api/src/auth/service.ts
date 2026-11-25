@@ -8,6 +8,7 @@ import { dummyHash, hashPassword, verifyPassword } from './passwords';
 import { fingerprint, randomToken, safeEqual, sha256, TokenSigner } from './tokens';
 import type { Mailer } from './mailer';
 import { LoginLockout, RateLimiter, tooManyRequests } from './rate-limit';
+import { KeyedMutex } from './locks';
 
 interface UserRow {
   user_id: number;
@@ -61,6 +62,13 @@ const toAuthUser = (u: UserRow): AuthUser => ({ userId: u.user_id, email: u.emai
 /** Normalises a submitted email for throttling, so case/whitespace variants share one budget. */
 const accountKey = (email: string) => email.trim().toLowerCase();
 
+const sessionEnded = () => unauthorized('Your session has ended. Sign in again.', 'TOKEN_REVOKED');
+const lastAdminDemote = () => conflict('This is the only administrator. Make someone else an administrator first.');
+const alreadySetUp = () => new HttpError(409, 'Parsimony is already set up', undefined, 'ALREADY_SET_UP');
+
+const isUniqueViolation = (e: unknown) =>
+  e instanceof Error && ((e as { errcode?: number }).errcode === 2067 || /UNIQUE constraint failed/.test(e.message));
+
 export class AuthService {
   /** Per IP (or per user on authenticated routes) request budget for the other `limit: 'auth'` routes. */
   readonly authLimiter: RateLimiter;
@@ -75,6 +83,14 @@ export class AuthService {
   private readonly throttleAudit = new RateLimiter(1, 60_000);
   /** One-time code required to create the first administrator; null once any user exists. */
   private setupCode: string | null = null;
+  /**
+   * Serialises every credential/role/session-revocation write for one user id: the precondition check, the
+   * (slow, event-loop-yielding) scrypt hash and the write. Writers also re-check inside the transaction, since
+   * the `users` CLI runs in another process.
+   */
+  readonly userLocks = new KeyedMutex<number>();
+  /** Password hashing; a field so tests can hold a hash in flight to reproduce races. */
+  readonly passwords = { hash: hashPassword, verify: verifyPassword };
 
   constructor(
     private readonly db: Db,
@@ -158,17 +174,37 @@ export class AuthService {
     return this.db.get<UserRow>('SELECT * FROM app_user WHERE user_id = ?', [id]);
   }
 
-  async createUser(input: { email: string; password: string; role: Role; displayName?: string | null }): Promise<AuthUser> {
+  /** Re-reads `u` (same id *and* created_at, so never a different account); undefined if it was deleted. */
+  private reread(u: UserRow): UserRow | undefined {
+    return this.db.get<UserRow>('SELECT * FROM app_user WHERE user_id = ? AND created_at = ?', [u.user_id, u.created_at]);
+  }
+
+  /** `onlyIfNoUsers`: fail (409) if any user exists by the time of the insert — first-run setup. */
+  async createUser(
+    input: { email: string; password: string; role: Role; displayName?: string | null },
+    opts: { onlyIfNoUsers?: boolean } = {},
+  ): Promise<AuthUser> {
     const email = input.email.trim();
-    if (this.findByEmail(email)) throw conflict(`A user with email ${email} already exists`);
-    const hash = await hashPassword(input.password);
-    const { lastInsertRowid } = this.db.run('INSERT INTO app_user (email, display_name, password_hash, role) VALUES (?, ?, ?, ?)', [
-      email,
-      input.displayName?.trim() || null,
-      hash,
-      input.role,
-    ]);
-    return toAuthUser(this.findById(lastInsertRowid)!);
+    const duplicate = () => conflict(`A user with email ${email} already exists`);
+    if (this.findByEmail(email)) throw duplicate();
+    const hash = await this.passwords.hash(input.password);
+    // Re-check after hashing, inside the inserting transaction: a concurrent create may have won meanwhile.
+    const id = this.db.tx(() => {
+      if (opts.onlyIfNoUsers && this.userCount() > 0) throw alreadySetUp();
+      if (this.findByEmail(email)) throw duplicate();
+      try {
+        return this.db.run('INSERT INTO app_user (email, display_name, password_hash, role) VALUES (?, ?, ?, ?)', [
+          email,
+          input.displayName?.trim() || null,
+          hash,
+          input.role,
+        ]).lastInsertRowid;
+      } catch (e) {
+        if (isUniqueViolation(e)) throw duplicate();
+        throw e;
+      }
+    });
+    return toAuthUser(this.findById(id)!);
   }
 
   listUsers(): User[] {
@@ -198,32 +234,56 @@ export class AuthService {
   }
 
   async updateUser(id: number, patch: { displayName?: string | null; role?: Role; password?: string }): Promise<User> {
-    const u = this.findById(id);
-    if (!u) throw notFound('User');
-    if (patch.role && patch.role !== 'ADMINISTRATOR' && u.role === 'ADMINISTRATOR' && this.adminCount() <= 1) {
-      throw conflict('This is the only administrator. Make someone else an administrator first.');
-    }
-    const hash = patch.password === undefined ? null : await hashPassword(patch.password);
-    this.db.tx(() => {
-      if (patch.displayName !== undefined) this.db.run('UPDATE app_user SET display_name = ? WHERE user_id = ?', [patch.displayName?.trim() || null, id]);
-      if (patch.role !== undefined) this.db.run('UPDATE app_user SET role = ? WHERE user_id = ?', [patch.role, id]);
-      if (hash) this.db.run('UPDATE app_user SET password_hash = ? WHERE user_id = ?', [hash, id]);
-      this.db.run(`UPDATE app_user SET updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE user_id = ?`, [id]);
-      // A new role or password must take effect everywhere immediately.
-      if ((patch.role !== undefined && patch.role !== u.role) || hash) this.revokeAll(id);
+    const demotes = (row: UserRow) => patch.role !== undefined && patch.role !== 'ADMINISTRATOR' && row.role === 'ADMINISTRATOR';
+    return this.userLocks.run(id, async () => {
+      const u = this.findById(id);
+      if (!u) throw notFound('User');
+      if (demotes(u) && this.adminCount() <= 1) throw lastAdminDemote();
+      const hash = patch.password === undefined ? null : await this.passwords.hash(patch.password);
+      this.db.tx(() => {
+        // Everything checked above may have changed while hashing; re-check against the committed state.
+        const cur = this.reread(u);
+        if (!cur) throw notFound('User');
+        if (demotes(cur) && this.adminCount() <= 1) throw lastAdminDemote();
+        if (hash) {
+          const r = this.db.run('UPDATE app_user SET password_hash = ? WHERE user_id = ? AND password_hash = ?', [hash, id, u.password_hash]);
+          if (r.changes === 0) throw conflict('The password was changed meanwhile. Reload and try again.');
+        }
+        if (patch.displayName !== undefined) this.db.run('UPDATE app_user SET display_name = ? WHERE user_id = ?', [patch.displayName?.trim() || null, id]);
+        if (patch.role !== undefined) this.db.run('UPDATE app_user SET role = ? WHERE user_id = ?', [patch.role, id]);
+        this.db.run(`UPDATE app_user SET updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE user_id = ?`, [id]);
+        // A new role or password must take effect everywhere immediately.
+        if ((patch.role !== undefined && patch.role !== cur.role) || hash) this.revokeAll(id);
+      });
+      return this.getUser(id);
     });
-    return this.getUser(id);
   }
 
-  deleteUser(id: number, actorId: number): void {
-    const u = this.findById(id);
-    if (!u) throw notFound('User');
-    if (id === actorId) throw conflict('You cannot delete your own account');
-    if (u.role === 'ADMINISTRATOR' && this.adminCount() <= 1) throw conflict('Cannot delete the only administrator');
-    this.db.tx(() => {
-      this.db.run('DELETE FROM user_session WHERE user_id = ?', [id]);
-      this.db.run('DELETE FROM app_user WHERE user_id = ?', [id]);
-    });
+  /** Deletes the user and their sessions; returns who was deleted (for the audit log). */
+  async deleteUser(id: number, actorId: number): Promise<AuthUser> {
+    return this.userLocks.run(id, () =>
+      this.db.tx(() => {
+        const u = this.findById(id);
+        if (!u) throw notFound('User');
+        if (id === actorId) throw conflict('You cannot delete your own account');
+        if (u.role === 'ADMINISTRATOR' && this.adminCount() <= 1) throw conflict('Cannot delete the only administrator');
+        this.db.run('DELETE FROM user_session WHERE user_id = ?', [id]);
+        this.db.run('DELETE FROM app_user WHERE user_id = ?', [id]);
+        return toAuthUser(u);
+      }),
+    );
+  }
+
+  /** Revokes all of a user's sessions, after any credential write already in flight for them. Returns the user. */
+  async revokeSessions(id: number): Promise<AuthUser> {
+    return this.userLocks.run(id, () =>
+      this.db.tx(() => {
+        const u = this.findById(id);
+        if (!u) throw notFound('User');
+        this.revokeAll(id);
+        return toAuthUser(u);
+      }),
+    );
   }
 
   updateProfile(userId: number, displayName: string | null): AuthUser {
@@ -236,17 +296,23 @@ export class AuthService {
 
   // ---------- sessions ----------
 
-  private async issue(user: UserRow, client: ClientInfo): Promise<IssuedSession> {
+  /** Inserts a session row (synchronous, so it can run inside a transaction). */
+  private insertSession(userId: number, client: ClientInfo): { sessionId: string; secret: string } {
     const sessionId = randomToken(16);
     const secret = randomToken(32);
     this.db.run('INSERT INTO user_session (session_id, user_id, token_hash, expires_at, ip, user_agent) VALUES (?, ?, ?, ?, ?, ?)', [
       sessionId,
-      user.user_id,
+      userId,
       sha256(secret),
       nowSeconds() + this.config.auth.refreshTokenTtl,
       client.ip,
       client.userAgent?.slice(0, 300) ?? null,
     ]);
+    return { sessionId, secret };
+  }
+
+  private async issue(user: UserRow, client: ClientInfo): Promise<IssuedSession> {
+    const { sessionId, secret } = this.insertSession(user.user_id, client);
     return { session: await this.accessFor(user, sessionId), refreshToken: `${sessionId}.${secret}` };
   }
 
@@ -316,12 +382,13 @@ export class AuthService {
   }
 
   async setup(code: string, input: { email: string; password: string; displayName?: string | null }, client: ClientInfo): Promise<IssuedSession> {
-    if (!this.setupCode || !this.setupRequired) throw new HttpError(409, 'Parsimony is already set up', undefined, 'ALREADY_SET_UP');
+    if (!this.setupCode || !this.setupRequired) throw alreadySetUp();
     if (!safeEqual(code.trim().toUpperCase(), this.setupCode)) {
       this.audit({ action: 'auth.setup_failed', ip: client.ip });
       throw unauthorized('The setup code is not correct. It is printed in the server log.', 'INVALID_SETUP_CODE');
     }
-    const user = await this.createUser({ ...input, role: 'ADMINISTRATOR' });
+    // Two setups racing with the code must not both create an administrator.
+    const user = await this.createUser({ ...input, role: 'ADMINISTRATOR' }, { onlyIfNoUsers: true });
     this.setupCode = null;
     this.audit({ action: 'auth.setup', user, ip: client.ip });
     return this.issue(this.findById(user.userId)!, client);
@@ -408,17 +475,34 @@ export class AuthService {
 
   /** Changes the password, signs out every other session and returns a fresh session for this browser. */
   async changePassword(userId: number, current: string, next: string, client: ClientInfo): Promise<IssuedSession> {
-    const u = this.findById(userId);
-    if (!u) throw notFound('User');
-    if (!(await verifyPassword(current, u.password_hash))) throw badRequest('The current password is not correct');
-    const hash = await hashPassword(next);
-    this.db.tx(() => {
-      this.db.run(`UPDATE app_user SET password_hash = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE user_id = ?`, [hash, userId]);
-      this.revokeAll(userId);
+    // Snapshot taken when the request arrives, before waiting for the lock: if this user's sessions are revoked
+    // (or the user deleted) after that point, even by a write queued ahead of us, this request must not go on
+    // to set a password and hand out a fresh session.
+    const start = this.findById(userId);
+    if (!start) throw sessionEnded();
+    const unchanged = (row: UserRow | undefined): row is UserRow => !!row && row.tokens_invalid_before === start.tokens_invalid_before;
+    return this.userLocks.run(userId, async () => {
+      const u = this.reread(start);
+      if (!unchanged(u)) throw sessionEnded();
+      if (!(await this.passwords.verify(current, u.password_hash))) throw badRequest('The current password is not correct');
+      const hash = await this.passwords.hash(next);
+      const { sessionId, secret } = this.db.tx(() => {
+        if (!unchanged(this.reread(u))) throw sessionEnded();
+        // Only replace the hash that was verified above.
+        const r = this.db.run(
+          `UPDATE app_user SET password_hash = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE user_id = ? AND password_hash = ?`,
+          [hash, userId, u.password_hash],
+        );
+        if (r.changes === 0) throw conflict('Your password was changed meanwhile. Sign in again and retry.');
+        this.revokeAll(userId);
+        // The replacement session is created in the same transaction, so any later revocation removes it too.
+        // Tokens issued in the same second as the revocation are still valid, so it works immediately.
+        return this.insertSession(userId, client);
+      });
+      const fresh = this.findById(userId)!;
+      this.audit({ action: 'auth.password_changed', user: toAuthUser(fresh), ip: client.ip });
+      return { session: await this.accessFor(fresh, sessionId), refreshToken: `${sessionId}.${secret}` };
     });
-    this.audit({ action: 'auth.password_changed', user: toAuthUser(u), ip: client.ip });
-    // Tokens issued in the same second as the revocation are still valid, so the new session works immediately.
-    return this.issue(this.findById(userId)!, client);
   }
 
   /** Always resolves the same way whether or not the email is registered. */
@@ -442,12 +526,21 @@ export class AuthService {
     const invalid = () => new HttpError(400, 'This reset link is invalid or has expired. Request a new one.', undefined, 'INVALID_RESET_TOKEN');
     const claims = await this.signer.verifyReset(token);
     if (!claims) throw invalid();
-    const u = this.findById(claims.userId);
-    if (!u || !safeEqual(claims.fingerprint, fingerprint(u.password_hash))) throw invalid();
-    const hash = await hashPassword(next);
-    this.db.tx(() => {
-      this.db.run(`UPDATE app_user SET password_hash = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE user_id = ?`, [hash, u.user_id]);
-      this.revokeAll(u.user_id);
+    const u = await this.userLocks.run(claims.userId, async () => {
+      const u = this.findById(claims.userId);
+      if (!u || !safeEqual(claims.fingerprint, fingerprint(u.password_hash))) throw invalid();
+      const hash = await this.passwords.hash(next);
+      this.db.tx(() => {
+        // Only replace the hash the link was issued for, on the same account: a link is good for one change.
+        const r = this.db.run(
+          `UPDATE app_user SET password_hash = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+           WHERE user_id = ? AND created_at = ? AND password_hash = ?`,
+          [hash, u.user_id, u.created_at, u.password_hash],
+        );
+        if (r.changes === 0) throw invalid();
+        this.revokeAll(u.user_id);
+      });
+      return u;
     });
     this.audit({ action: 'auth.password_reset', user: toAuthUser(u), ip: client.ip });
   }

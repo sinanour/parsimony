@@ -107,6 +107,17 @@ request was HTTPS. With `COOKIE_SECURE=auto`, that means the socket is TLS, or `
 It's used by sign-out-everywhere, password change and reset, role change, and admin password reset. A
 password change then issues a fresh session for the current browser.
 
+**Credential writes** — password change, password reset, admin edits (role/password/name), user deletion
+and session revocation for one user are serialised by an in-process per-user lock (`auth/locks.ts`) held
+across the precondition check, the scrypt hash (which yields the event loop) and the write. Because the
+`users` CLI runs in another process, each writer also re-checks inside its write transaction: the row still
+exists with the same `user_id` *and* `created_at`; the password hash is still the one that was verified
+(`UPDATE … WHERE password_hash = ?`, else 409); a password change refuses (401) if `tokens_invalid_before`
+moved since the request arrived, and inserts its replacement session in the same transaction so a later
+revocation removes it; the last-administrator guard is re-evaluated; and duplicate emails (including a
+UNIQUE violation) are 409. `app_user.user_id` is `AUTOINCREMENT` (migration 004), seeded past every id seen
+in `app_user`, `user_session` and `audit_log`, so a deleted user's id is never given to someone else.
+
 **First run** — the setup code is 10 characters from a 32-symbol alphabet (~50 bits). It's held in
 memory only, compared in constant time, and only accepted while `app_user` is empty.
 
