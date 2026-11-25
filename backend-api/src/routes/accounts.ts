@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { bool, numOrNull, strOrNull, type Db } from '../db';
 import { conflict, notFound } from '../http';
 import type { Account, AuthUser } from '../../../shared/types';
+import { visibleSql } from '../redact';
 import { idParam, requiredText, TEXT_LIMITS, type RouteModule } from './common';
 
 const accountInput = z.object({
@@ -27,12 +28,9 @@ const accountInput = z.object({
     .transform((s) => (s ? s.toLowerCase() : null)),
 });
 
-/** Read-only users only ever see the last four characters of account numbers. */
-export function maskForRole(n: string, user: AuthUser | null): string {
-  return user?.role === 'READ_ONLY' && n.length > 4 ? `••••${n.slice(-4)}` : n;
-}
+// Account numbers, and long digit runs in names, are masked for READ_ONLY users by the router (redact.ts).
 
-function listAccounts(db: Db, id?: number): Account[] {
+function listAccounts(db: Db, id?: number, user: AuthUser | null = null): Account[] {
   const rows = db.all(
     `SELECT a.account_idx, a.name, a.is_credit_card, a.is_corporate, a.is_active, a.statement_file_pattern,
             r.first_transaction_month, r.last_transaction_month, r.missing_month_count,
@@ -41,7 +39,7 @@ function listAccounts(db: Db, id?: number): Account[] {
             (SELECT COUNT(*) FROM payment x WHERE x.account_idx = a.account_idx) AS payment_count
      FROM account a LEFT JOIN vw_transaction_date_ranges r USING (account_idx)
      ${id === undefined ? '' : 'WHERE a.account_idx = ?'}
-     ORDER BY a.is_active DESC, a.name`,
+     ORDER BY a.is_active DESC, ${visibleSql('a.name', user)}`,
     id === undefined ? [] : [id],
   );
   const numbers = new Map<number, string[]>();
@@ -77,12 +75,10 @@ function writeNumbers(db: Db, id: number, numbers: string[]): void {
   for (const n of numbers) db.run('INSERT INTO account_num (account_idx, account_no) VALUES (?, ?)', [id, n]);
 }
 
-const masked = (a: Account, user: AuthUser | null): Account => ({ ...a, accountNumbers: a.accountNumbers.map((n) => maskForRole(n, user)) });
-
 export const accountRoutes: RouteModule = (r, { db }) => {
-  r.get('/api/accounts', ({ user }) => listAccounts(db).map((a) => masked(a, user)));
+  r.get('/api/accounts', ({ user }) => listAccounts(db, undefined, user));
 
-  r.get('/api/accounts/:id', ({ params, user }) => masked(getAccount(db, idParam.parse(params.id)), user));
+  r.get('/api/accounts/:id', ({ params }) => getAccount(db, idParam.parse(params.id)));
 
   r.post('/api/accounts', ({ body }) => {
     const input = accountInput.parse(body);

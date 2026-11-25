@@ -105,6 +105,21 @@ Access levels: `public`, `user` (any role), `editor` (EDITOR, ADMINISTRATOR), `a
 out explicitly. Read-only operations that happen to be POSTs (rule preview, dry run) declare
 `access: 'user'`. A test walks `router.list()` and asserts every non-public route returns 401 without a token.
 
+**Read-only masking.** Read-only users never receive a full card or bank number (SPEC A3). Numbers hide
+in account names ("Visa (4505 …)"), payee account numbers, statement descriptions and confirmations, so
+masking is a property of the response, not of individual routes: when the caller is `READ_ONLY` the router
+passes every JSON body (and error body) through `redactValue` (`src/redact.ts`). Fields that are account
+numbers (`accountNum`, `accountNumbers`, …) are cut to `••••` + their last four characters; in every other
+string, any run of at least 7 digits — single spaces or dashes may separate the groups, as in
+`0812 3456-789` — becomes `••••` + its last four digits. ISO dates and timestamps, round numbers (the rule
+engine's `2000000000` bounds) and JSON numbers (amounts, ids) are left alone. Text `Reply` bodies are
+redacted the same way unless the handler did it itself (`Reply.redacted`; the corporate CSV redacts its
+cells so amounts stay intact). Only the auth routes, which return the caller's own tokens and no
+bookkeeping data, opt out (`redact: false`). So that searches can't confirm masked digits, `q` searches,
+the expense category filter, text sorts and rule previews match a read-only user against the redacted text
+(`visibleSql()` wraps the column in the `redact_digits()` SQL function `Db` registers). Stored data is never
+changed. A test crawls every GET route in `router.list()` as a read-only user and fails on any leaked digits.
+
 Error bodies are `{ error, code, details? }`. Unexpected errors return a generic 500, and the details
 go to the server log only.
 

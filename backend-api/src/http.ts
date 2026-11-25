@@ -3,6 +3,7 @@ import path from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { ZodError } from 'zod';
 import type { AuthUser, Role } from '../../shared/types';
+import { isReadOnly, redactDigits, redactValue } from './redact';
 
 export class HttpError extends Error {
   constructor(
@@ -61,6 +62,11 @@ export class Reply {
     readonly body: string | Buffer,
     readonly headers: Record<string, string> = {},
     readonly status = 200,
+    /**
+     * Set when the handler already redacted the body for the caller's role (see redact.ts); otherwise a
+     * text body sent to a READ_ONLY user has its long digit runs masked by the router.
+     */
+    readonly redacted = false,
   ) {}
 }
 
@@ -80,6 +86,11 @@ export interface RouteOptions {
    * smaller per-user budget of their own.
    */
   limit?: RateLimitBucket;
+  /**
+   * Responses to READ_ONLY users have card and bank numbers masked (redact.ts). Default true; only routes
+   * that return the caller's own credentials (access tokens) and no bookkeeping data turn it off.
+   */
+  redact?: boolean;
 }
 
 export interface Route {
@@ -92,6 +103,7 @@ export interface Route {
   access: Access;
   audit: boolean;
   limit: RateLimitBucket;
+  redact: boolean;
 }
 
 export type RateLimitBucket = 'auth' | 'api' | 'heavy';
@@ -138,6 +150,7 @@ export class Router {
       access: opts.access ?? (method === 'GET' ? 'user' : 'editor'),
       audit: opts.audit ?? method !== 'GET',
       limit: opts.limit ?? 'api',
+      redact: opts.redact ?? true,
     });
     return this;
   }
@@ -214,16 +227,17 @@ export class Router {
         }
       }
       const result = await route.handler(ctx);
+      const redact = route.redact && isReadOnly(ctx.user);
       if (result instanceof Reply) {
         status = result.status;
         res.writeHead(result.status, { 'Cache-Control': 'no-store', ...result.headers });
-        res.end(result.body);
+        res.end(redact && !result.redacted ? redactBody(result.body, result.headers) : result.body);
       } else {
         status = result === undefined ? 204 : 200;
-        sendJson(res, status, result);
+        sendJson(res, status, redact ? redactValue(result) : result);
       }
     } catch (e) {
-      status = sendError(res, e);
+      status = sendError(res, e, !!route?.redact && isReadOnly(ctx.user));
     }
     if (route && route.audit && ctx.user && status !== 401 && status !== 403) {
       try {
@@ -351,15 +365,23 @@ export function sendJson(res: ServerResponse, status: number, data: unknown, hea
   res.end(body);
 }
 
-/** Sends an error response and returns its status code. */
-export function sendError(res: ServerResponse, e: unknown): number {
+/** Text bodies (CSV, JSON, …) for READ_ONLY users; binary bodies are passed through. */
+function redactBody(body: string | Buffer, headers: Record<string, string>): string | Buffer {
+  if (typeof body === 'string') return redactDigits(body);
+  const type = Object.entries(headers).find(([k]) => k.toLowerCase() === 'content-type')?.[1] ?? '';
+  return /^text\/|[/+]json\b/i.test(type) ? Buffer.from(redactDigits(body.toString('utf8')), 'utf8') : body;
+}
+
+/** Sends an error response and returns its status code. `redact`: the caller is READ_ONLY (see redact.ts). */
+export function sendError(res: ServerResponse, e: unknown, redact = false): number {
+  const r = <T>(v: T): T => (redact ? (redactValue(v) as T) : v);
   if (e instanceof ZodError) {
     const msg = e.issues.map((i) => `${i.path.join('.') || 'body'}: ${i.message}`).join('; ');
-    sendJson(res, 400, { error: msg, code: 'VALIDATION_ERROR', details: e.issues });
+    sendJson(res, 400, r({ error: msg, code: 'VALIDATION_ERROR', details: e.issues }));
     return 400;
   }
   if (e instanceof HttpError) {
-    sendJson(res, e.status, { error: e.message, code: e.code, details: e.details }, e.headers);
+    sendJson(res, e.status, r({ error: e.message, code: e.code, details: e.details }), e.headers);
     return e.status;
   }
   console.error(e);

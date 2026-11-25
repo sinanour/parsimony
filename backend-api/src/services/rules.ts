@@ -199,7 +199,16 @@ export function matchCount(db: Db, rule: RuleRow): number {
   );
 }
 
-export function previewRule(db: Db, input: Pick<RuleInput, 'descriptionFilter' | 'minimumAmount' | 'maximumAmount' | 'isCorporate'>, limit = 200): RulePreview {
+/**
+ * `readOnly`: match the filter against descriptions as a READ_ONLY user sees them (long digit runs masked,
+ * see redact.ts), so a preview can't be used to confirm the masked digits of a card number in a description.
+ */
+export function previewRule(
+  db: Db,
+  input: Pick<RuleInput, 'descriptionFilter' | 'minimumAmount' | 'maximumAmount' | 'isCorporate'>,
+  limit = 200,
+  readOnly = false,
+): RulePreview {
   const c = compileRule({
     expense_categorization_rule_idx: 0,
     description_filter: input.descriptionFilter,
@@ -209,7 +218,8 @@ export function previewRule(db: Db, input: Pick<RuleInput, 'descriptionFilter' |
     exemption: null,
     is_corporate: input.isCorporate ? 1 : 0,
   });
-  const where = `e.expense_idx IN (SELECT expense_idx FROM expense WHERE ${RULE_PREDICATE} AND length(description) <= ${MAX_DESCRIPTION})`;
+  const predicate = readOnly ? RULE_PREDICATE.replace('description LIKE ?', 'redact_digits(description) LIKE ?') : RULE_PREDICATE;
+  const where = `e.expense_idx IN (SELECT expense_idx FROM expense WHERE ${predicate} AND length(description) <= ${MAX_DESCRIPTION})`;
   const total = db.scalar<number>(`SELECT COUNT(*) FROM expense e WHERE ${where}`, c.bindValues);
   const items = db.all<RuleMatch>(`${MATCH_SELECT} WHERE ${where} ORDER BY e.transaction_date DESC LIMIT ${limit}`, c.bindValues);
   return { total, items };

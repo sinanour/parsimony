@@ -1,7 +1,8 @@
 import { z } from 'zod';
 import { bool, numOrNull, strOrNull, type Db } from '../db';
 import { conflict, notFound } from '../http';
-import type { Payee } from '../../../shared/types';
+import type { AuthUser, Payee } from '../../../shared/types';
+import { visibleSql } from '../redact';
 import { idParam, requiredText, text, TEXT_LIMITS, type RouteModule } from './common';
 
 const payeeInput = z.object({
@@ -12,7 +13,8 @@ const payeeInput = z.object({
   paymentPeriod: z.number().int().min(1).max(120),
 });
 
-function listPayees(db: Db, id?: number): Payee[] {
+// accountNum, and long digit runs in payee names, are masked for READ_ONLY users by the router (redact.ts).
+function listPayees(db: Db, id?: number, user: AuthUser | null = null): Payee[] {
   return db
     .all(
       `SELECT p.payee_idx, p.payee, p.account_num, p.is_active, p.payee_category, p.payment_period,
@@ -24,7 +26,7 @@ function listPayees(db: Db, id?: number): Payee[] {
          SELECT payment_idx FROM payment p2 WHERE p2.payee_idx = p.payee_idx
          ORDER BY p2.transaction_date DESC, p2.payment_idx DESC LIMIT 1)
        ${id === undefined ? '' : 'WHERE p.payee_idx = ?'}
-       ORDER BY p.is_active DESC, p.payee`,
+       ORDER BY p.is_active DESC, ${visibleSql('p.payee', user)}`,
       id === undefined ? [] : [id],
     )
     .map((r) => ({
@@ -48,7 +50,7 @@ function getPayee(db: Db, id: number): Payee {
 }
 
 export const payeeRoutes: RouteModule = (r, { db }) => {
-  r.get('/api/payees', () => listPayees(db));
+  r.get('/api/payees', ({ user }) => listPayees(db, undefined, user));
   r.get('/api/payees/:id', ({ params }) => getPayee(db, idParam.parse(params.id)));
 
   r.post('/api/payees', ({ body }) => {

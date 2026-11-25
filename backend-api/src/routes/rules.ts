@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { badRequest, forbidden, notFound } from '../http';
 import { countRules, getRuleRow, listRules, matchCount, previewRule, runRules, toRule } from '../services/rules';
 import { idParam, queryObject, requiredText, TEXT_LIMITS, type RouteModule } from './common';
+import { isReadOnly } from '../redact';
 
 const ruleInput = z
   .object({
@@ -48,7 +49,11 @@ export const ruleRoutes: RouteModule = (r, { db, config }) => {
   // Previews and dry runs change nothing, so any signed-in user may run them (read-only users get
   // "Preview rules" on the Rules page). A run costs one pass per rule, so runs and dry runs share the
   // per-user `heavy` budget and evaluate at most RULES_MAX_PER_SCOPE rules.
-  r.post('/api/rules/preview', ({ body }) => previewRule(db, previewInput.parse(body)), { access: 'user', audit: false });
+  // A read-only user's filter is matched against the redacted descriptions they are shown (redact.ts).
+  r.post('/api/rules/preview', ({ body, user }) => previewRule(db, previewInput.parse(body), undefined, isReadOnly(user)), {
+    access: 'user',
+    audit: false,
+  });
 
   r.post(
     '/api/rules/run',

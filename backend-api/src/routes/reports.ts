@@ -4,7 +4,7 @@ import { badRequest, Reply } from '../http';
 import { TEXT_LIMITS } from '../../../shared/types';
 import type { CorporateReport, CorporateRow, CoverageRow, DashboardData, DateRange, HuquqReport, Meta, MonthlySpendingRow, PaymentTotalRow } from '../../../shared/types';
 import { upcomingPayments } from './payments';
-import { maskForRole } from './accounts';
+import { redactForRole, visibleSql } from '../redact';
 import { isoDate, localToday, queryObject, scopeClause, scopeSchema, type RouteModule } from './common';
 
 const rangeInput = z
@@ -48,7 +48,7 @@ function csvCell(v: unknown): string {
 }
 
 export const reportRoutes: RouteModule = (r, { db }) => {
-  r.get('/api/meta', (): Meta => {
+  r.get('/api/meta', ({ user }): Meta => {
     // Every user loads this on sign-in. Categories longer than the stored limit can only be legacy rows
     // written before the limit existed; leaving them out keeps one oversized value from bloating it.
     const maxCategory = TEXT_LIMITS.category;
@@ -68,7 +68,7 @@ export const reportRoutes: RouteModule = (r, { db }) => {
         .map((x) => x.c),
       accounts: db
         .all(
-          'SELECT account_idx, substr(name, 1, ?) AS name, is_active, is_corporate, is_credit_card FROM account ORDER BY is_active DESC, name',
+          `SELECT account_idx, substr(name, 1, ?) AS name, is_active, is_corporate, is_credit_card FROM account ORDER BY is_active DESC, ${visibleSql('name', user)}`,
           [TEXT_LIMITS.accountName],
         )
         .map((a) => ({
@@ -161,7 +161,7 @@ export const reportRoutes: RouteModule = (r, { db }) => {
       category: String(x.category),
       subcategory: x.subcategory === null ? null : String(x.subcategory),
       accountType: String(x.account_type),
-      accountNum: x.account_num === null ? null : maskForRole(String(x.account_num), user),
+      accountNum: x.account_num === null ? null : String(x.account_num),
       transactionDate: String(x.transaction_date),
       cheque: String(x.cheque ?? ''),
       description: x.description === null ? null : String(x.description),
@@ -171,18 +171,26 @@ export const reportRoutes: RouteModule = (r, { db }) => {
     }));
     const range = getRange(db, 'corporate_date_range');
     if (query.get('format') === 'csv') {
+      // Redact the cells, not the finished text, so numeric cells (amounts) are never mistaken for
+      // account numbers; the JSON form is redacted by the router.
+      const cells = redactForRole(rows, user);
       const header = ['Category', 'Subcategory', 'Account Type', 'Account #', 'Has Receipt', 'Date', 'Cheque', 'Description', 'Description 2', 'Amount', 'Adjustment'];
       const lines = [header.join(',')].concat(
-        rows.map((x) =>
+        cells.map((x) =>
           [x.category, x.subcategory, x.accountType, x.accountNum, '', x.transactionDate, x.cheque, x.description, x.description2, x.amount, x.adjustment]
             .map(csvCell)
             .join(','),
         ),
       );
-      return new Reply(lines.join('\r\n') + '\r\n', {
-        'Content-Type': 'text/csv; charset=utf-8',
-        'Content-Disposition': `attachment; filename="corporate-transactions-${range.startDate}-to-${range.endDate}.csv"`,
-      });
+      return new Reply(
+        lines.join('\r\n') + '\r\n',
+        {
+          'Content-Type': 'text/csv; charset=utf-8',
+          'Content-Disposition': `attachment; filename="corporate-transactions-${range.startDate}-to-${range.endDate}.csv"`,
+        },
+        200,
+        true,
+      );
     }
     return { range, rows } satisfies CorporateReport;
   });

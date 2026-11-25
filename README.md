@@ -90,7 +90,7 @@ Settings come from environment variables. For local runs, put them in `.env` at 
 |---|---|
 | Administrator | Everything, plus managing users and reading the audit log |
 | Editor | View and change all data, import statements, run rules |
-| Read-only | View data and reports; account numbers are masked |
+| Read-only | View data and reports; account numbers (including those in account names, payees and descriptions) are masked |
 
 Administrators manage users under **Administration → Users**. If nobody can sign in, use the CLI on
 the server:

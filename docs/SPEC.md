@@ -79,7 +79,7 @@ is a separate package because only operators need it.
 ### 5.2 Accounts
 * A1 — List accounts with flags, number of account numbers, first/last transaction month and missing-month count. Filter by active / personal / business / credit card.
 * A2 — Create and edit an account: name, credit card, business, active, its account numbers and an optional statement file-name pattern.
-* A3 — Account numbers are masked (last 4 digits) by default and can be revealed by editors and administrators. Read-only users only ever receive masked numbers from the API.
+* A3 — Account numbers are masked (last 4 digits) by default and can be revealed by editors and administrators. Read-only users only ever receive masked numbers from the API — account and payee account numbers, and any run of 7 or more digits (spaces or dashes allowed) in other text such as account names, descriptions and confirmations, are shown as `••••` + the last 4 digits in every response and export. Their searches, filters, sorts and rule previews match only that masked text.
 * A4 — Delete only when the account has no expenses, deposits or payments. Otherwise the user is told to deactivate it.
 
 ### 5.3 Payees

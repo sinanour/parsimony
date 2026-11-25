@@ -42,13 +42,15 @@ const client = (ctx: Ctx) => ({ ip: ctx.ip, userAgent: ctx.req.headers['user-age
 
 export const authRoutes: RouteModule = (r, deps) => {
   const { auth } = deps;
+  // Auth routes return the caller's own session (access tokens, whose base64 can contain digit runs) and
+  // no bookkeeping data, so they are exempt from read-only redaction (redact.ts).
   /** Public routes with a per-IP request budget. */
-  const pub = { access: 'public', audit: false, limit: 'auth' } as const;
+  const pub = { access: 'public', audit: false, limit: 'auth', redact: false } as const;
   /**
    * Public routes that throttle themselves on something callers can't share or spend for each other:
    * login (per submitted account + per-IP *failures*), refresh (per presented session), logout (no-op without a cookie).
    */
-  const selfThrottled = { access: 'public', audit: false } as const;
+  const selfThrottled = { access: 'public', audit: false, redact: false } as const;
 
   r.get(
     '/api/config',
@@ -59,7 +61,7 @@ export const authRoutes: RouteModule = (r, deps) => {
       locale: deps.config.locale,
       version: deps.version,
     }),
-    { access: 'public' },
+    { access: 'public', redact: false },
   );
 
   r.post(
@@ -113,10 +115,10 @@ export const authRoutes: RouteModule = (r, deps) => {
       auth.audit({ action: 'auth.logout_all', user: ctx.user, ip: ctx.ip });
       setRefreshCookie(ctx, deps, null);
     },
-    { access: 'user', audit: false },
+    { access: 'user', audit: false, redact: false },
   );
 
-  r.get('/api/auth/me', (ctx) => ctx.user);
+  r.get('/api/auth/me', (ctx) => ctx.user, { redact: false });
 
   r.patch(
     '/api/auth/me',
@@ -124,7 +126,7 @@ export const authRoutes: RouteModule = (r, deps) => {
       const b = z.object({ displayName: z.string().trim().max(100).nullable() }).strict().parse(ctx.body);
       return auth.updateProfile(ctx.user!.userId, b.displayName);
     },
-    { access: 'user' },
+    { access: 'user', redact: false },
   );
 
   r.post(
@@ -133,7 +135,7 @@ export const authRoutes: RouteModule = (r, deps) => {
       const b = z.object({ currentPassword: z.string().max(1024), newPassword: passwordSchema }).parse(ctx.body);
       return respond(ctx, deps, await auth.changePassword(ctx.user!.userId, b.currentPassword, b.newPassword, client(ctx)));
     },
-    { access: 'user', audit: false, limit: 'auth' },
+    { access: 'user', audit: false, limit: 'auth', redact: false },
   );
 
   r.post(

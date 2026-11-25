@@ -1,7 +1,8 @@
 import { z } from 'zod';
 import { strOrNull, type Db } from '../db';
 import { badRequest, notFound } from '../http';
-import type { DueStatus, Payment, UpcomingPayment } from '../../../shared/types';
+import type { AuthUser, DueStatus, Payment, UpcomingPayment } from '../../../shared/types';
+import { visibleSql } from '../redact';
 import { idParam, isoDate, localToday, money, pagingSchema, queryObject, searchText, TEXT_LIMITS, trimmedOrNull, type RouteModule } from './common';
 
 const paymentInput = z.object({
@@ -21,12 +22,14 @@ const listQuery = pagingSchema.extend({
   sort: z.enum(['transactionDate', 'amount', 'payeeName', 'payerAccountName']).default('transactionDate'),
 });
 
-const SORT_COLUMNS: Record<string, string> = {
-  transactionDate: 'pmt.transaction_date',
-  amount: 'pmt.amount',
-  payeeName: 'p.payee',
-  payerAccountName: 'a.name',
-};
+/** Text sorts use visibleSql, so a READ_ONLY user's order never depends on masked digits. */
+const sortColumn = (sort: string, u: AuthUser | null): string =>
+  ({
+    transactionDate: 'pmt.transaction_date',
+    amount: 'pmt.amount',
+    payeeName: visibleSql('p.payee', u),
+    payerAccountName: visibleSql('a.name', u),
+  })[sort]!;
 
 const SELECT = `SELECT pmt.payment_idx, pmt.payee_idx, p.payee, p.payee_category, pmt.transaction_date, pmt.amount,
   pmt.confirmation, pmt.account_idx, a.name AS account_name
@@ -110,7 +113,7 @@ export const paymentRoutes: RouteModule = (r, { db }) => {
     return { amount: last?.amount ?? null, payerAccountIdx: last?.account_idx ?? null };
   });
 
-  r.get('/api/payments', ({ query }) => {
+  r.get('/api/payments', ({ query, user }) => {
     const q = listQuery.parse(queryObject(query));
     const where: string[] = [];
     const params: (string | number)[] = [];
@@ -119,7 +122,8 @@ export const paymentRoutes: RouteModule = (r, { db }) => {
     if (q.from) (where.push('pmt.transaction_date >= ?'), params.push(q.from));
     if (q.to) (where.push('pmt.transaction_date <= ?'), params.push(q.to));
     if (q.q) {
-      where.push('(pmt.confirmation LIKE ? OR p.payee LIKE ?)');
+      // READ_ONLY users match against the redacted text they see, so a digit search can't confirm masked digits.
+      where.push(`(${visibleSql('pmt.confirmation', user)} LIKE ? OR ${visibleSql('p.payee', user)} LIKE ?)`);
       params.push(`%${q.q}%`, `%${q.q}%`);
     }
     const w = where.length ? `WHERE ${where.join(' AND ')}` : '';
@@ -128,7 +132,7 @@ export const paymentRoutes: RouteModule = (r, { db }) => {
       params,
     );
     const items = db
-      .all(`${SELECT} ${w} ORDER BY ${SORT_COLUMNS[q.sort]} ${q.dir}, pmt.payment_idx ${q.dir} LIMIT ? OFFSET ?`, [
+      .all(`${SELECT} ${w} ORDER BY ${sortColumn(q.sort, user)} ${q.dir}, pmt.payment_idx ${q.dir} LIMIT ? OFFSET ?`, [
         ...params,
         q.pageSize,
         (q.page - 1) * q.pageSize,

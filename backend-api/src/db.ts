@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import nodePath from 'node:path';
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
+import { redactDigits } from './redact';
 
 export type Param = string | number | bigint | boolean | null | undefined;
 export type Row = Record<string, unknown>;
@@ -24,6 +25,8 @@ export class Db {
     // Referential checks are performed explicitly in the route handlers instead.
     this.raw.exec('PRAGMA foreign_keys = OFF');
     this.raw.exec('PRAGMA busy_timeout = 5000');
+    // Text as a read-only user sees it (see redact.ts), so their searches and sorts can't reveal masked digits.
+    this.raw.function('redact_digits', { deterministic: true }, (v) => (typeof v === 'string' ? redactDigits(v) : v));
   }
 
   all<T = Row>(sql: string, params: Param[] = []): T[] {

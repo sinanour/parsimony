@@ -1,7 +1,8 @@
 import { z } from 'zod';
 import { bool, numOrNull, strOrNull, type Db, type Param } from '../db';
 import { badRequest, notFound } from '../http';
-import { UNCATEGORIZED, type Deposit, type Expense } from '../../../shared/types';
+import { UNCATEGORIZED, type AuthUser, type Deposit, type Expense } from '../../../shared/types';
+import { visibleSql } from '../redact';
 import {
   EXEMPT_AMOUNT_SQL,
   idParam,
@@ -48,13 +49,18 @@ const expenseQuery = baseQuery.extend({
   sort: z.enum(['transactionDate', 'amount', 'description', 'category', 'accountName']).default('transactionDate'),
 });
 
-const EXPENSE_SORT: Record<string, string> = {
-  transactionDate: 'e.transaction_date',
-  amount: 'e.amount',
-  description: 'e.description COLLATE NOCASE',
-  category: 'e.category COLLATE NOCASE',
-  accountName: 'a.name',
-};
+/**
+ * Sort expressions. Text columns go through visibleSql, so a READ_ONLY user's sort order (like their
+ * searches) depends only on the redacted text they are shown, never on masked digits.
+ */
+const expenseSort = (sort: string, u: AuthUser | null): string =>
+  ({
+    transactionDate: 'e.transaction_date',
+    amount: 'e.amount',
+    description: `${visibleSql('e.description', u)} COLLATE NOCASE`,
+    category: `${visibleSql('e.category', u)} COLLATE NOCASE`,
+    accountName: visibleSql('a.name', u),
+  })[sort]!;
 
 const expenseInput = z.object({
   transactionDate: isoDate,
@@ -120,13 +126,14 @@ const depositQuery = baseQuery.extend({
   sort: z.enum(['transactionDate', 'amount', 'description', 'incomeAmount', 'accountName']).default('transactionDate'),
 });
 
-const DEPOSIT_SORT: Record<string, string> = {
-  transactionDate: 'd.transaction_date',
-  amount: 'd.amount',
-  incomeAmount: 'd.income_amount',
-  description: 'd.description COLLATE NOCASE',
-  accountName: 'a.name',
-};
+const depositSort = (sort: string, u: AuthUser | null): string =>
+  ({
+    transactionDate: 'd.transaction_date',
+    amount: 'd.amount',
+    incomeAmount: 'd.income_amount',
+    description: `${visibleSql('d.description', u)} COLLATE NOCASE`,
+    accountName: visibleSql('a.name', u),
+  })[sort]!;
 
 const depositInput = z.object({
   transactionDate: isoDate,
@@ -192,24 +199,27 @@ function patchRow(db: Db, table: string, idCol: string, id: number, columns: Rec
 // ---------- routes ----------
 
 export const transactionRoutes: RouteModule = (r, { db }) => {
-  r.get('/api/expenses', ({ query }) => {
+  r.get('/api/expenses', ({ query, user }) => {
+    const v = (col: string) => visibleSql(col, user);
     const q = expenseQuery.parse(queryObject(query));
     const where = [scopeClause(q.scope)];
     const params: Param[] = [];
     if (q.accountIdx) (where.push('e.account_idx = ?'), params.push(q.accountIdx));
     if (q.category === UNCATEGORIZED) where.push("COALESCE(e.category, '') = ''");
-    else if (q.category) (where.push('e.category = ?'), params.push(q.category));
+    else if (q.category) (where.push(`${v('e.category')} = ?`), params.push(q.category));
     if (q.from) (where.push('e.transaction_date >= ?'), params.push(q.from));
     if (q.to) (where.push('e.transaction_date <= ?'), params.push(q.to));
+    // READ_ONLY users search, filter and sort the redacted text they see, so a digit search can't
+    // confirm masked digits (see redact.ts).
     if (q.q) {
-      where.push('(e.description LIKE ? OR e.comment LIKE ?)');
+      where.push(`(${v('e.description')} LIKE ? OR ${v('e.comment')} LIKE ?)`);
       params.push(`%${q.q}%`, `%${q.q}%`);
     }
     const w = `WHERE ${where.join(' AND ')}`;
     const from = 'FROM expense e LEFT JOIN account a ON a.account_idx = e.account_idx';
     const totals = db.get<{ n: number; amount: number }>(`SELECT COUNT(*) AS n, COALESCE(SUM(e.amount), 0) AS amount ${from} ${w}`, params)!;
     const items = db
-      .all(`${EXPENSE_SELECT} ${w} ORDER BY ${EXPENSE_SORT[q.sort]} ${q.dir}, e.expense_idx ${q.dir} LIMIT ? OFFSET ?`, [
+      .all(`${EXPENSE_SELECT} ${w} ORDER BY ${expenseSort(q.sort, user)} ${q.dir}, e.expense_idx ${q.dir} LIMIT ? OFFSET ?`, [
         ...params,
         q.pageSize,
         (q.page - 1) * q.pageSize,
@@ -258,7 +268,8 @@ export const transactionRoutes: RouteModule = (r, { db }) => {
     db.run('DELETE FROM expense WHERE expense_idx = ?', [id]);
   });
 
-  r.get('/api/deposits', ({ query }) => {
+  r.get('/api/deposits', ({ query, user }) => {
+    const v = (col: string) => visibleSql(col, user);
     const q = depositQuery.parse(queryObject(query));
     const where = [scopeClause(q.scope)];
     const params: Param[] = [];
@@ -267,14 +278,14 @@ export const transactionRoutes: RouteModule = (r, { db }) => {
     if (q.from) (where.push('d.transaction_date >= ?'), params.push(q.from));
     if (q.to) (where.push('d.transaction_date <= ?'), params.push(q.to));
     if (q.q) {
-      where.push('(d.description LIKE ? OR d.comment LIKE ?)');
+      where.push(`(${v('d.description')} LIKE ? OR ${v('d.comment')} LIKE ?)`);
       params.push(`%${q.q}%`, `%${q.q}%`);
     }
     const w = `WHERE ${where.join(' AND ')}`;
     const from = 'FROM deposit d LEFT JOIN account a ON a.account_idx = d.account_idx';
     const totals = db.get<{ n: number; amount: number }>(`SELECT COUNT(*) AS n, COALESCE(SUM(d.amount), 0) AS amount ${from} ${w}`, params)!;
     const items = db
-      .all(`${DEPOSIT_SELECT} ${w} ORDER BY ${DEPOSIT_SORT[q.sort]} ${q.dir}, d.deposit_idx ${q.dir} LIMIT ? OFFSET ?`, [
+      .all(`${DEPOSIT_SELECT} ${w} ORDER BY ${depositSort(q.sort, user)} ${q.dir}, d.deposit_idx ${q.dir} LIMIT ? OFFSET ?`, [
         ...params,
         q.pageSize,
         (q.page - 1) * q.pageSize,
