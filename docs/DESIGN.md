@@ -68,10 +68,37 @@ Why these choices:
 ### 2.3 Request pipeline
 
 ```
-match route → authenticate (Bearer JWT, optional) → authorize (route.access vs role)
-            → rate-limit → read body (size-limited; only after auth) → handler
+match route → same-origin check (non-GET/HEAD/OPTIONS) → authenticate (Bearer JWT, optional)
+            → authorize (route.access vs role) → rate-limit → content-type check (JSON routes)
+            → read body (size-limited; only after auth) → handler
             → JSON / Reply → audit (non-GET routes with audit: true)
 ```
+
+**Same-origin check** (`checkSameOrigin`, every state-changing route including bodyless ones such as
+refresh and logout, and the raw statement upload). 403 `CROSS_SITE_REQUEST` when:
+
+1. `Sec-Fetch-Site` is present and not `same-origin` or `none` (`same-site` is refused too). Browsers set
+   this header and pages can't forge it, so `same-origin` is accepted without looking further.
+2. Otherwise `Origin` is present and is `null`, unparsable, or not this server: it must equal the
+   `PUBLIC_URL` origin, or `scheme://host` where scheme comes from `isSecure()` and host from
+   `X-Forwarded-Host` (with `TRUST_PROXY=true`) or `Host`. Behind a trusted proxy the scheme isn't
+   compared (an outer TLS hop may talk HTTP to nginx), and when the forwarded host has no port (nginx's
+   `$host` strips it) only the host name is compared. nginx sends `X-Forwarded-Host $http_host`, which keeps
+   the port, so deployments on a non-default port (`https://host:19100`) compare host and port exactly.
+
+Requests with neither header are not from a browser, so they can't carry a victim's cookie, and pass.
+
+**Content type.** Non-raw routes parse JSON only when the body is labelled `application/json` (with
+optional parameters) or `application/*+json`; any other type on a declared body, or a non-empty body with
+no type, is 415 `UNSUPPORTED_MEDIA_TYPE` before the body is buffered. A cross-site `<form>` can only send
+`text/plain`, `application/x-www-form-urlencoded` or `multipart/form-data`, so it can't reach a JSON route
+even in a browser without Fetch Metadata or Origin. Raw routes (`{ raw: true }`, statement upload) take
+their body as is. Bodyless POSTs need no type.
+
+Not adopted: refusing sign-in while a valid refresh cookie is present (the cookie is `SameSite=Strict`, so
+a cross-site login never carries it, and it would block switching accounts), a double-submit token (the
+checks above already cover it), and the `__Host-` cookie prefix (it needs `Path=/` and `Secure`, which
+conflicts with scoping the cookie to `/api/auth` and with HTTP-only deployments).
 
 Access levels: `public`, `user` (any role), `editor` (EDITOR, ADMINISTRATOR), `admin`. The default is
 `user` for GET and `editor` for everything else, so a new write route is protected unless someone opts

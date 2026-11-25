@@ -66,6 +66,7 @@ export async function createApp(config: Config, opts: AppOptions = {}): Promise<
 
   const router = new Router();
   router.trustProxy = config.trustProxy;
+  router.publicOrigin = originOf(config.publicUrl);
   router.guard = {
     authenticate: (req) => auth.authenticate(req),
     rateLimit: (route: Route, ctx: Ctx) => {
@@ -101,4 +102,15 @@ export async function createApp(config: Config, opts: AppOptions = {}): Promise<
   });
   server.on('close', () => db.close());
   return { server, db, auth, router, setupCode, backupFile, migrationsApplied };
+}
+
+/** The origin of PUBLIC_URL, or '' when it is unset or not a URL (same-origin checks then use the Host). */
+function originOf(url: string): string {
+  if (!url) return '';
+  try {
+    return new URL(url).origin;
+  } catch {
+    console.warn(`PUBLIC_URL (${url}) is not a valid URL; ignoring it for same-origin checks.`);
+    return '';
+  }
 }

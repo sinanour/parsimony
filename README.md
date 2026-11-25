@@ -78,8 +78,8 @@ Settings come from environment variables. For local runs, put them in `.env` at 
 | `ADMIN_EMAIL` / `ADMIN_PASSWORD` | — | Creates the first administrator if no users exist |
 | `JWT_SECRET` | generated | ≥ 32 characters; otherwise generated into `DATA_DIR/jwt-secret` |
 | `ACCESS_TOKEN_TTL` / `REFRESH_TOKEN_TTL` | `15m` / `7d` | |
-| `SMTP_*`, `PUBLIC_URL` | — | Enables "Forgot password?" (both are required) |
-| `TRUST_PROXY` | `false` | Set `true` only behind a reverse proxy that sets `X-Real-IP` / `X-Forwarded-Proto` |
+| `SMTP_*`, `PUBLIC_URL` | — | Enables "Forgot password?" (both are required). `PUBLIC_URL` is also always accepted as the app's own origin by the cross-site check |
+| `TRUST_PROXY` | `false` | Set `true` only behind a reverse proxy that sets `X-Real-IP` / `X-Forwarded-Proto` / `X-Forwarded-Host` |
 
 ## Users and roles
 

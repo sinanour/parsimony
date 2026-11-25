@@ -108,6 +108,8 @@ export class Router {
   private routes: Route[] = [];
   guard: Guard | null = null;
   trustProxy = false;
+  /** The public origin (from PUBLIC_URL), always accepted as a same-origin `Origin`. Empty when unset. */
+  publicOrigin = '';
 
   add(method: string, pattern: string, handler: Handler, opts: RouteOptions = {}): this {
     const keys: string[] = [];
@@ -181,6 +183,9 @@ export class Router {
       route = found.route;
       ctx.params = found.params;
 
+      // Refuse cross-site writes before doing anything else (login CSRF, session fixation).
+      if (!SAFE_METHODS.has(route.method)) checkSameOrigin(req, this.trustProxy, this.publicOrigin);
+
       // Authenticate and authorize before reading the body, so anonymous callers can't make us buffer uploads.
       ctx.user = this.guard ? await this.guard.authenticate(req) : null;
       if (route.access !== 'public') {
@@ -189,10 +194,14 @@ export class Router {
       }
       this.guard?.rateLimit(route, ctx);
 
+      // JSON routes accept only a JSON media type, so an HTML form (text/plain, urlencoded, multipart)
+      // can never be parsed as an API request. Checked before buffering when the body is declared.
+      if (!route.raw && hasDeclaredBody(req) && !isJsonType(req)) throw unsupportedMediaType();
       const buf = await readBody(req, route.raw ? RAW_LIMIT : JSON_LIMIT);
       if (route.raw) {
         ctx.rawBody = buf;
       } else if (buf.length > 0) {
+        if (!isJsonType(req)) throw unsupportedMediaType();
         try {
           ctx.body = JSON.parse(buf.toString('utf8'));
         } catch {
@@ -220,6 +229,68 @@ export class Router {
     }
     return true;
   }
+}
+
+const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
+
+const unsupportedMediaType = () =>
+  new HttpError(415, 'Request body must be JSON (Content-Type: application/json)', undefined, 'UNSUPPORTED_MEDIA_TYPE');
+
+const crossSite = () => new HttpError(403, 'Cross-site requests are not allowed', undefined, 'CROSS_SITE_REQUEST');
+
+/** `application/json`, optionally with parameters, or any `application/*+json` type. */
+function isJsonType(req: IncomingMessage): boolean {
+  const type = header(req, 'content-type')?.split(';')[0].trim().toLowerCase() ?? '';
+  return type === 'application/json' || /^application\/[a-z0-9.!#$&^_-]+\+json$/.test(type);
+}
+
+function hasDeclaredBody(req: IncomingMessage): boolean {
+  const len = header(req, 'content-length');
+  return (len !== undefined && len.trim() !== '0') || header(req, 'transfer-encoding') !== undefined;
+}
+
+/**
+ * Throws 403 unless a state-changing request comes from this app's own origin.
+ *
+ * Browsers mark every request with `Sec-Fetch-Site` (which pages cannot forge); anything but
+ * `same-origin` / `none` is refused, and `same-origin` is trusted as is. Browsers without Fetch Metadata
+ * still send `Origin` on cross-origin POSTs, which must then name this server: `PUBLIC_URL`, or the scheme
+ * and host the browser connected to (Host, or X-Forwarded-Host behind a trusted proxy). `Origin: null`
+ * (sandboxed frames, some redirects) is refused. Callers that send neither header — curl, scripts, the
+ * test suite — are not browsers, can't carry a victim's cookies, and pass.
+ */
+export function checkSameOrigin(req: IncomingMessage, trustProxy: boolean, publicOrigin: string): void {
+  const site = header(req, 'sec-fetch-site')?.trim().toLowerCase();
+  if (site === 'same-origin') return;
+  if (site !== undefined && site !== 'none') throw crossSite();
+  const origin = header(req, 'origin')?.trim();
+  if (origin === undefined) return;
+  let o: URL;
+  try {
+    o = new URL(origin);
+  } catch {
+    throw crossSite();
+  }
+  if (origin === 'null' || (o.protocol !== 'https:' && o.protocol !== 'http:')) throw crossSite();
+  if (publicOrigin && o.origin === publicOrigin) return;
+
+  const scheme = isSecure(req, trustProxy) ? 'https' : 'http';
+  // A trusted proxy's X-Forwarded-Host (nginx sends `$http_host`, port included) wins over Host.
+  const host = ((trustProxy && header(req, 'x-forwarded-host')?.split(',')[0].trim()) || header(req, 'host')?.trim()) ?? '';
+  let self: URL;
+  try {
+    self = new URL(`${scheme}://${host}`);
+  } catch {
+    throw crossSite();
+  }
+  if (host && self.origin === o.origin) return;
+  if (host && trustProxy) {
+    // Behind a proxy the scheme we see may be an inner hop's, and nginx's `$host` drops the port, so
+    // compare host and port, or only the host name when the forwarded host carries no port.
+    const hasPort = /:\d+$/.test(host);
+    if (hasPort ? self.host === o.host : self.hostname === o.hostname) return;
+  }
+  throw crossSite();
 }
 
 function header(req: IncomingMessage, name: string): string | undefined {

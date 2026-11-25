@@ -120,6 +120,10 @@ setup. The deploy CLI warns when it detects a Finch host without this configurat
 * Without HTTPS, passwords cross the network unencrypted. Only do that on a trusted network, or behind
   another TLS-terminating proxy. In that case set `BIND_ADDRESS=127.0.0.1` and make sure the proxy
   sends `X-Forwarded-Proto` and `X-Real-IP`.
+* The API refuses state-changing requests from other sites (`Sec-Fetch-Site` / `Origin` checks).
+  nginx forwards the browser's `Host` with its port as `X-Forwarded-Host`, so a non-default
+  `HTTPS_PORT` works. If another proxy sits in front and rewrites the host, keep its `Host` header
+  as the browser sent it or set `PUBLIC_URL` to the address users open.
 
 ## Running Compose by hand
 
