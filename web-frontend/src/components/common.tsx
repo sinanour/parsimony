@@ -9,7 +9,7 @@ import Modal from '@cloudscape-design/components/modal';
 import SegmentedControl from '@cloudscape-design/components/segmented-control';
 import Select, { type SelectProps } from '@cloudscape-design/components/select';
 import SpaceBetween from '@cloudscape-design/components/space-between';
-import type { Scope } from '../../../shared/types';
+import { TEXT_LIMITS, type Scope } from '../../../shared/types';
 import { useApp } from '../context/AppContext';
 
 /** Cloudscape link that navigates client-side. */
@@ -114,6 +114,7 @@ export function CategoryInput({
       empty="No matching categories"
       autoFocus={autoFocus}
       expandToViewport
+      nativeInputAttributes={{ maxLength: TEXT_LIMITS.category }}
     />
   );
 }

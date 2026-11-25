@@ -1,7 +1,7 @@
 import path from 'node:path';
 import type { Db } from '../db';
 import { badRequest, payloadTooLarge } from '../http';
-import type { ImportCommitRequest, ImportParseResponse, ImportRecord } from '../../../shared/types';
+import { TEXT_LIMITS, type ImportCommitRequest, type ImportParseResponse, type ImportRecord } from '../../../shared/types';
 import { parseStatementFile } from './statements';
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
@@ -49,11 +49,15 @@ export async function parseStatement(
   const accountNames = new Map(
     db.all<{ account_idx: number; name: string }>('SELECT account_idx, name FROM account').map((a) => [a.account_idx, a.name]),
   );
+  // Statement text is the bank's, not the user's: an over-long description is cut to the stored limit
+  // (with a warning) rather than failing the whole import. Commit rejects anything longer.
+  const maxDescription = TEXT_LIMITS.description;
+  let truncated = 0;
   const records: ImportRecord[] = parsed.records.map((r, i) => ({
     key: `${i}`,
     type: r.type,
     transactionDate: r.transactionDate,
-    description: r.description,
+    description: r.description.length > maxDescription ? (truncated++, r.description.slice(0, maxDescription)) : r.description,
     amount: round2(r.amount),
     accountIdx: r.accountIdx,
     accountName: accountNames.get(r.accountIdx) ?? `Unknown account #${r.accountIdx}`,
@@ -64,7 +68,11 @@ export async function parseStatement(
   }));
 
   flagDuplicates(db, records);
-  const warnings = [...parsed.warnings, ...overlapWarnings(db, records)];
+  const warnings = [
+    ...parsed.warnings,
+    ...(truncated > 0 ? [`${truncated} description(s) were longer than ${maxDescription} characters and were shortened.`] : []),
+    ...overlapWarnings(db, records),
+  ];
   return { fileName: base, formatName: parsed.formatName, records, warnings };
 }
 

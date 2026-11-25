@@ -108,6 +108,30 @@ out explicitly. Read-only operations that happen to be POSTs (rule preview, dry 
 Error bodies are `{ error, code, details? }`. Unexpected errors return a generic 500, and the details
 go to the server log only.
 
+**Text lengths.** Every persisted free-text field is capped (`TEXT_LIMITS` in `shared/types.ts`, used by
+the zod schemas through `requiredText` / `text` / `trimmedOrNull(max)` in `routes/common.ts`, and by the
+frontend as input `maxLength`). The caps leave wide headroom over real bank data (longest observed
+description 83, category 66, comment 331 characters; rule-written comments are at most ~550). Without them
+one editor could store megabyte categories that every user then downloads in `/api/meta`, or long
+descriptions and filters that make each rule match count a description-length × filter-length LIKE.
+Legacy rows written before the caps are never altered; instead the shared reads ignore them:
+`/api/meta` leaves out categories and payee categories longer than the cap and returns account names cut
+to it, and match counts (`GET /api/rules`, `/api/rules/:id`) and previews skip rules whose filter, and
+expenses whose description, is longer than the cap (such a rule reports 0 matches). Running the rules
+still applies them as stored. To find such rows (nothing deletes them automatically):
+
+```sql
+SELECT 'expense', expense_idx, length(description), length(category), length(comment) FROM expense
+ WHERE length(description) > 500 OR length(category) > 100 OR length(comment) > 2000;
+SELECT 'deposit', deposit_idx, length(description), length(comment) FROM deposit
+ WHERE length(description) > 500 OR length(comment) > 2000;
+SELECT 'rule', expense_categorization_rule_idx, length(description_filter), length(category)
+  FROM expense_categorization_rule WHERE length(description_filter) > 200 OR length(category) > 100;
+SELECT 'account', account_idx, length(name) FROM account WHERE length(name) > 100;
+SELECT 'payee', payee_idx, length(payee), length(payee_category) FROM payee
+ WHERE length(payee) > 200 OR length(payee_category) > 100 OR length(account_num) > 64;
+```
+
 ### 2.4 Authentication
 
 **Tokens.** The access token is an HS256 JWT `{ sub: userId, sid: sessionId, typ: 'access', iat, exp }`
@@ -247,6 +271,9 @@ per record type for the whole statement (the distinct keys are passed as a JSON 
   so no format can backtrack exponentially (the pentest's `%Y` + 29 × `%H` + `Z` took 15 s on a 62-character
   cell). Date cells longer than 40 characters are rejected before any matching. A stored format that no
   longer compiles (saved before this rule) is skipped with a warning, never run.
+* Parsed descriptions longer than `TEXT_LIMITS.description` (500) are cut to it, with one warning per
+  file, so a commit of the parse result always validates; a commit carrying a longer description or
+  category (only possible from a hand-built request) is refused with 400, and nothing is inserted.
 * Parse, commit, rule runs (including dry runs) and statement-format writes share a per-user `heavy` rate
   limit (`HEAVY_RATE_LIMIT_PER_MINUTE`, default 30) on top of the general per-user limit.
 

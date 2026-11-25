@@ -11,6 +11,9 @@ import {
   queryObject,
   scopeClause,
   scopeSchema,
+  searchText,
+  requiredText,
+  TEXT_LIMITS,
   trimmedOrNull,
   type RouteModule,
 } from './common';
@@ -22,7 +25,7 @@ const baseQuery = pagingSchema.extend({
   accountIdx: z.coerce.number().int().optional(),
   from: isoDate.optional(),
   to: isoDate.optional(),
-  q: z.string().optional(),
+  q: searchText.optional(),
 });
 
 function checkAccount(db: Db, accountIdx: number): void {
@@ -41,7 +44,7 @@ function inList(n: number): string {
 // ---------- expenses ----------
 
 const expenseQuery = baseQuery.extend({
-  category: z.string().optional(),
+  category: searchText.optional(),
   sort: z.enum(['transactionDate', 'amount', 'description', 'category', 'accountName']).default('transactionDate'),
 });
 
@@ -55,12 +58,12 @@ const EXPENSE_SORT: Record<string, string> = {
 
 const expenseInput = z.object({
   transactionDate: isoDate,
-  category: trimmedOrNull,
+  category: trimmedOrNull(TEXT_LIMITS.category),
   exemption: exemptionSchema,
-  description: z.string().trim().min(1, 'is required'),
+  description: requiredText(TEXT_LIMITS.description),
   amount: money,
   accountIdx: z.number().int().positive(),
-  comment: trimmedOrNull,
+  comment: trimmedOrNull(TEXT_LIMITS.comment),
 });
 
 const expensePatch = expenseInput.partial().strict();
@@ -68,9 +71,9 @@ const expensePatch = expenseInput.partial().strict();
 const expenseBulk = z
   .object({
     ids,
-    category: trimmedOrNull,
+    category: trimmedOrNull(TEXT_LIMITS.category),
     exemption: exemptionSchema.optional(),
-    comment: trimmedOrNull,
+    comment: trimmedOrNull(TEXT_LIMITS.comment),
   })
   .refine((b) => b.category !== undefined || b.exemption !== undefined || b.comment !== undefined, 'Nothing to update');
 
@@ -127,11 +130,11 @@ const DEPOSIT_SORT: Record<string, string> = {
 
 const depositInput = z.object({
   transactionDate: isoDate,
-  description: trimmedOrNull,
+  description: trimmedOrNull(TEXT_LIMITS.description),
   amount: money,
   incomeAmount: money,
   reviewed: z.boolean(),
-  comment: trimmedOrNull,
+  comment: trimmedOrNull(TEXT_LIMITS.comment),
   accountIdx: z.number().int().positive(),
 });
 

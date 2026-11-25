@@ -11,7 +11,7 @@ import SpaceBetween from '@cloudscape-design/components/space-between';
 import Table from '@cloudscape-design/components/table';
 import Tabs from '@cloudscape-design/components/tabs';
 import TextFilter from '@cloudscape-design/components/text-filter';
-import type { Payment, UpcomingPayment } from '../../../shared/types';
+import { TEXT_LIMITS, type Payment, type UpcomingPayment } from '../../../shared/types';
 import { api } from '../api/client';
 import { AccountSelect, ConfirmModal, DateRangeFilter, EmptyState, type IsoRange } from '../components/common';
 import { DueStatus } from '../components/DueStatus';
@@ -165,7 +165,7 @@ function HistoryTab({ version, onEdit, onDelete }: { version: number; onEdit: (p
           <TextFilter
             filteringText={text}
             filteringPlaceholder="Payee or confirmation #"
-            onChange={(e) => setText(e.detail.filteringText)}
+            onChange={(e) => setText(e.detail.filteringText.slice(0, TEXT_LIMITS.search))}
             onDelayedChange={(e) => {
               setQuery(e.detail.filteringText);
               resetPage();

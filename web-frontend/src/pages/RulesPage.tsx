@@ -13,7 +13,7 @@ import Modal from '@cloudscape-design/components/modal';
 import SpaceBetween from '@cloudscape-design/components/space-between';
 import Table, { type TableProps } from '@cloudscape-design/components/table';
 import TextFilter from '@cloudscape-design/components/text-filter';
-import type { Rule, RuleInput, RuleMatch, RulePreview, RuleRunResponse } from '../../../shared/types';
+import { TEXT_LIMITS, type Rule, type RuleInput, type RuleMatch, type RulePreview, type RuleRunResponse } from '../../../shared/types';
 import { api } from '../api/client';
 import { CategoryInput, ConfirmModal, EmptyState, ScopeControl } from '../components/common';
 import { useApp } from '../context/AppContext';
@@ -187,7 +187,12 @@ function RuleModal({
               }
               errorText={submitted ? errors.descriptionFilter : undefined}
             >
-              <Input value={d.descriptionFilter} onChange={(e) => setD({ ...d, descriptionFilter: e.detail.value })} autoFocus />
+              <Input
+                value={d.descriptionFilter}
+                onChange={(e) => setD({ ...d, descriptionFilter: e.detail.value })}
+                autoFocus
+                nativeInputAttributes={{ maxLength: TEXT_LIMITS.ruleFilter }}
+              />
             </FormField>
             <ColumnLayout columns={2}>
               <FormField label="Minimum amount" constraintText="Optional, inclusive" errorText={submitted ? errors.minimumAmount : undefined}>

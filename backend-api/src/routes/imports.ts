@@ -3,7 +3,7 @@ import { badRequest, payloadTooLarge } from '../http';
 import { commitRecords, parseStatement } from '../services/importer';
 import { countRules, runRules } from '../services/rules';
 import type { ImportCommitResponse } from '../../../shared/types';
-import { isoDate, money, queryObject, type RouteModule } from './common';
+import { isoDate, money, queryObject, TEXT_LIMITS, type RouteModule } from './common';
 
 const commitInput = z.object({
   records: z
@@ -11,10 +11,12 @@ const commitInput = z.object({
       z.object({
         type: z.enum(['expense', 'deposit']),
         transactionDate: isoDate,
-        description: z.string().min(1),
+        // Same caps as the expense/deposit routes. Parse truncates statement descriptions to this length,
+        // so only a hand-built or edited request can exceed it, and it is rejected rather than cut.
+        description: z.string().min(1).max(TEXT_LIMITS.description),
         amount: money,
         accountIdx: z.number().int().positive(),
-        category: z.string().nullable(),
+        category: z.string().max(TEXT_LIMITS.category).nullable(),
         exemption: z.number().nullable(),
         incomeAmount: z.number().nullable(),
       }),

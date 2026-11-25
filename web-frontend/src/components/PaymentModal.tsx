@@ -8,7 +8,7 @@ import Input from '@cloudscape-design/components/input';
 import Modal from '@cloudscape-design/components/modal';
 import Select, { type SelectProps } from '@cloudscape-design/components/select';
 import SpaceBetween from '@cloudscape-design/components/space-between';
-import type { Payee, Payment } from '../../../shared/types';
+import { TEXT_LIMITS, type Payee, type Payment } from '../../../shared/types';
 import { api } from '../api/client';
 import { useApp } from '../context/AppContext';
 import { errorMessage, formatMoney, parseNumber, today } from '../utils/format';
@@ -159,7 +159,7 @@ export default function PaymentModal({ visible, onDismiss, onSaved, payment, pay
               <Input value={amount} onChange={(e) => setAmount(e.detail.value)} inputMode="decimal" placeholder="0.00" invalid={submitted && !!errors.amount} />
             </FormField>
             <FormField label="Confirmation #" constraintText="Optional">
-              <Input value={confirmation} onChange={(e) => setConfirmation(e.detail.value)} />
+              <Input value={confirmation} onChange={(e) => setConfirmation(e.detail.value)} nativeInputAttributes={{ maxLength: TEXT_LIMITS.confirmation }} />
             </FormField>
             <FormField label="Paid from" errorText={submitted ? errors.account : undefined}>
               <AccountSelect value={accountIdx} onChange={setAccountIdx} activeOnly invalid={submitted && !!errors.account} />

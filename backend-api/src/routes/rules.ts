@@ -1,14 +1,14 @@
 import { z } from 'zod';
 import { badRequest, forbidden, notFound } from '../http';
 import { countRules, getRuleRow, listRules, matchCount, previewRule, runRules, toRule } from '../services/rules';
-import { idParam, queryObject, type RouteModule } from './common';
+import { idParam, queryObject, requiredText, TEXT_LIMITS, type RouteModule } from './common';
 
 const ruleInput = z
   .object({
-    descriptionFilter: z.string().trim().min(1, 'is required'),
+    descriptionFilter: requiredText(TEXT_LIMITS.ruleFilter),
     minimumAmount: z.number().finite().nullable(),
     maximumAmount: z.number().finite().nullable(),
-    category: z.string().trim().min(1, 'is required'),
+    category: requiredText(TEXT_LIMITS.category),
     exemption: z.number().finite().min(0).nullable(),
     isCorporate: z.boolean(),
   })
@@ -18,7 +18,7 @@ const ruleInput = z
   });
 
 const previewInput = z.object({
-  descriptionFilter: z.string().trim().min(1),
+  descriptionFilter: requiredText(TEXT_LIMITS.ruleFilter),
   minimumAmount: z.number().finite().nullable(),
   maximumAmount: z.number().finite().nullable(),
   isCorporate: z.boolean(),

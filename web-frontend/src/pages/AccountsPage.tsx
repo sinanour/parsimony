@@ -16,7 +16,7 @@ import StatusIndicator from '@cloudscape-design/components/status-indicator';
 import Table from '@cloudscape-design/components/table';
 import TextFilter from '@cloudscape-design/components/text-filter';
 import Toggle from '@cloudscape-design/components/toggle';
-import type { Account, AccountInput } from '../../../shared/types';
+import { TEXT_LIMITS, type Account, type AccountInput } from '../../../shared/types';
 import { api } from '../api/client';
 import { ConfirmModal, EmptyState } from '../components/common';
 import { useApp } from '../context/AppContext';
@@ -91,7 +91,7 @@ function AccountModal({ account, visible, onDismiss, onSaved }: { account: Accou
       <Form errorText={error}>
         <SpaceBetween size="m">
           <FormField label="Name" errorText={submitted ? nameError : undefined}>
-            <Input value={form.name} onChange={(e) => setForm({ ...form, name: e.detail.value })} autoFocus />
+            <Input value={form.name} onChange={(e) => setForm({ ...form, name: e.detail.value })} autoFocus nativeInputAttributes={{ maxLength: TEXT_LIMITS.accountName }} />
           </FormField>
           <ColumnLayout columns={3}>
             <Checkbox checked={form.isCreditCard} onChange={(e) => setForm({ ...form, isCreditCard: e.detail.checked })}>
@@ -113,6 +113,7 @@ function AccountModal({ account, visible, onDismiss, onSaved }: { account: Accou
                   control: (item, i) => (
                     <Input
                       value={item.n}
+                      nativeInputAttributes={{ maxLength: TEXT_LIMITS.accountNumber }}
                       onChange={(e) => {
                         const next = [...form.accountNumbers];
                         next[i] = e.detail.value;
@@ -138,6 +139,7 @@ function AccountModal({ account, visible, onDismiss, onSaved }: { account: Accou
               value={form.statementFilePattern ?? ''}
               onChange={(e) => setForm({ ...form, statementFilePattern: e.detail.value || null })}
               placeholder="e.g. rbc personal visa"
+              nativeInputAttributes={{ maxLength: TEXT_LIMITS.statementFilePattern }}
             />
           </FormField>
         </SpaceBetween>

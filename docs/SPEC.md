@@ -181,6 +181,21 @@ is a separate package because only operators need it.
 * N2 — **Schema migrations** run automatically at startup, in order, each in a transaction, and are recorded in `schema_migrations`. The baseline migration creates the bookkeeping schema if it is missing and leaves an existing database untouched, so databases created by earlier versions or by the original Python scripts upgrade in place. Later migrations only add things (new tables, new nullable columns).
 * N3 — A timestamped backup (`VACUUM INTO`) is written at every startup **before** migrations run. The newest `BACKUP_KEEP` (default 10) are kept.
 * N4 — All multi-row writes are atomic. SQL is always parameterized. Inputs are validated on the server.
+* N4a — Every stored free-text field has a maximum length (`TEXT_LIMITS` in `shared/types.ts`, counted after any trimming); longer values are refused with 400 `VALIDATION_ERROR` on create, update, bulk edit and import commit, and the UI inputs carry the same `maxLength`. Statement import shortens over-long parsed descriptions to the limit with a warning instead of failing the file. Shared reads leave out legacy values stored before the limits: `/api/meta` omits longer categories and payee categories and shortens account names, and rule match counts and previews skip over-long filters and descriptions (see DESIGN §2.3).
+
+  | Field | Max |
+  |---|---|
+  | Expense / deposit / import description | 500 |
+  | Expense / rule / payee category, import category | 100 |
+  | Expense / deposit comment | 2,000 |
+  | Rule description filter (also preview) | 200 |
+  | Account name | 100 |
+  | Account number (spaces removed); numbers per account | 64; 20 |
+  | Account statement file pattern | 200 |
+  | Payee name; payee account number | 200; 64 |
+  | Payment confirmation | 200 |
+  | List search (`q`) and category filter | 200 |
+  | Statement format name, file pattern, header names (unchanged) | 200 |
 * N5 — Foreign-key enforcement stays off (the schema declares `ON DELETE CASCADE`). Referential checks are explicit, so deleting a record can never silently delete transactions.
 * N6 — Tests run against a freshly migrated temporary database seeded with synthetic data and never touch a real database.
 

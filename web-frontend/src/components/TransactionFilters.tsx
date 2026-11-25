@@ -1,7 +1,7 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import SpaceBetween from '@cloudscape-design/components/space-between';
 import TextFilter from '@cloudscape-design/components/text-filter';
-import type { Scope } from '../../../shared/types';
+import { TEXT_LIMITS, type Scope } from '../../../shared/types';
 import { AccountSelect, DateRangeFilter, ScopeControl } from './common';
 
 export interface FilterValues {
@@ -33,7 +33,7 @@ export function TransactionFilters({
         filteringText={text}
         filteringPlaceholder="Description or comment"
         countText={values.q ? countText : undefined}
-        onChange={(e) => setText(e.detail.filteringText)}
+        onChange={(e) => setText(e.detail.filteringText.slice(0, TEXT_LIMITS.search))}
         onDelayedChange={(e) => onChange({ q: e.detail.filteringText })}
       />
       <ScopeControl value={values.scope} onChange={(scope) => onChange({ scope, accountIdx: null })} />

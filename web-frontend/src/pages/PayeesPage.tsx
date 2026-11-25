@@ -14,7 +14,7 @@ import StatusIndicator from '@cloudscape-design/components/status-indicator';
 import Table, { type TableProps } from '@cloudscape-design/components/table';
 import TextFilter from '@cloudscape-design/components/text-filter';
 import Toggle from '@cloudscape-design/components/toggle';
-import type { Payee, PayeeInput } from '../../../shared/types';
+import { TEXT_LIMITS, type Payee, type PayeeInput } from '../../../shared/types';
 import { api } from '../api/client';
 import { ConfirmModal, EmptyState } from '../components/common';
 import PaymentModal from '../components/PaymentModal';
@@ -91,10 +91,10 @@ function PayeeModal({ payee, visible, onDismiss, onSaved }: { payee: Payee | nul
       <Form errorText={error}>
         <SpaceBetween size="m">
           <FormField label="Payee" errorText={submitted ? nameError : undefined}>
-            <Input value={form.payee} onChange={(e) => setForm({ ...form, payee: e.detail.value })} autoFocus />
+            <Input value={form.payee} onChange={(e) => setForm({ ...form, payee: e.detail.value })} autoFocus nativeInputAttributes={{ maxLength: TEXT_LIMITS.payee }} />
           </FormField>
           <FormField label="Account number with payee" description="Your customer or policy number with this payee.">
-            <Input value={form.accountNum} onChange={(e) => setForm({ ...form, accountNum: e.detail.value })} />
+            <Input value={form.accountNum} onChange={(e) => setForm({ ...form, accountNum: e.detail.value })} nativeInputAttributes={{ maxLength: TEXT_LIMITS.payeeAccountNum }} />
           </FormField>
           <FormField label="Category">
             <Autosuggest
@@ -103,6 +103,7 @@ function PayeeModal({ payee, visible, onDismiss, onSaved }: { payee: Payee | nul
               options={(meta?.payeeCategories ?? []).map((c) => ({ value: c }))}
               enteredTextLabel={(v) => `Use "${v}"`}
               placeholder="e.g. Utilities"
+              nativeInputAttributes={{ maxLength: TEXT_LIMITS.category }}
             />
           </FormField>
           <FormField label="Payment frequency" description="Used to work out when the next payment is due.">

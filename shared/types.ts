@@ -164,6 +164,36 @@ export interface TransactionQuery {
 
 export const UNCATEGORIZED = '__uncategorized__';
 
+/**
+ * Maximum lengths (in characters, after trimming) of the free-text fields the ledger stores. The API
+ * rejects longer values with 400; statement import truncates parsed descriptions to `description`.
+ * Shared values every user loads (category lists, rule match counts) also leave out legacy rows that
+ * exceed these, so one oversized value can't bloat or slow them. Chosen with wide headroom over real
+ * bank data (the longest stored descriptions are well under 100 characters).
+ */
+export const TEXT_LIMITS = {
+  /** Expense and deposit descriptions (also import records). */
+  description: 500,
+  /** Expense and rule categories, and payee categories. */
+  category: 100,
+  /** Expense and deposit comments (rule runs write ~300–550 character comments). */
+  comment: 2000,
+  /** A rule's description filter (a SQL LIKE pattern). */
+  ruleFilter: 200,
+  accountName: 100,
+  /** One account number (whitespace removed). */
+  accountNumber: 64,
+  /** Account numbers per account. */
+  accountNumbersPerAccount: 20,
+  statementFilePattern: 200,
+  payee: 200,
+  payeeAccountNum: 64,
+  /** Payment confirmation numbers / notes. */
+  confirmation: 200,
+  /** Free-text search (`q`) and other text filters in list queries. */
+  search: 200,
+} as const;
+
 export interface Rule {
   ruleIdx: number;
   descriptionFilter: string;

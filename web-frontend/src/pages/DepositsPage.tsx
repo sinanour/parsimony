@@ -14,7 +14,7 @@ import Select, { type SelectProps } from '@cloudscape-design/components/select';
 import SpaceBetween from '@cloudscape-design/components/space-between';
 import StatusIndicator from '@cloudscape-design/components/status-indicator';
 import Table, { type TableProps } from '@cloudscape-design/components/table';
-import type { Deposit, Scope } from '../../../shared/types';
+import { TEXT_LIMITS, type Deposit, type Scope } from '../../../shared/types';
 import { api } from '../api/client';
 import { AccountSelect, ConfirmModal, EmptyState, editableColumns } from '../components/common';
 import { TransactionFilters } from '../components/TransactionFilters';
@@ -116,7 +116,7 @@ function AddDepositModal({ visible, onDismiss, onDone }: { visible: boolean; onD
             <DatePicker value={date} onChange={(e) => setDate(e.detail.value)} placeholder="YYYY/MM/DD" />
           </FormField>
           <FormField label="Description">
-            <Input value={description} onChange={(e) => setDescription(e.detail.value)} />
+            <Input value={description} onChange={(e) => setDescription(e.detail.value)} nativeInputAttributes={{ maxLength: TEXT_LIMITS.description }} />
           </FormField>
           <FormField label="Amount" errorText={submitted ? errors.amount : undefined}>
             <Input value={amount} onChange={(e) => setAmount(e.detail.value)} inputMode="decimal" />
@@ -128,7 +128,7 @@ function AddDepositModal({ visible, onDismiss, onDone }: { visible: boolean; onD
             Reviewed
           </Checkbox>
           <FormField label="Comment" constraintText="Optional">
-            <Input value={comment} onChange={(e) => setComment(e.detail.value)} />
+            <Input value={comment} onChange={(e) => setComment(e.detail.value)} nativeInputAttributes={{ maxLength: TEXT_LIMITS.comment }} />
           </FormField>
         </SpaceBetween>
       </Form>
@@ -210,12 +210,12 @@ export default function DepositsPage() {
     ),
   });
 
-  const textEditor = (label: string, get: (d: Deposit) => string | null) => ({
+  const textEditor = (label: string, get: (d: Deposit) => string | null, maxLength: number) => ({
     ariaLabel: label,
     editIconAriaLabel: 'editable',
     errorIconAriaLabel: `${label} error`,
     editingCell: (item: Deposit, { currentValue, setValue }: { currentValue?: string; setValue: (v: string) => void }) => (
-      <Input autoFocus value={currentValue ?? get(item) ?? ''} onChange={(e) => setValue(e.detail.value)} />
+      <Input autoFocus value={currentValue ?? get(item) ?? ''} onChange={(e) => setValue(e.detail.value)} nativeInputAttributes={{ maxLength }} />
     ),
   });
 
@@ -305,7 +305,7 @@ export default function DepositsPage() {
             sortingField: 'description',
             isRowHeader: true,
             width: 300,
-            editConfig: textEditor('Description', (d) => d.description),
+            editConfig: textEditor('Description', (d) => d.description, TEXT_LIMITS.description),
           },
           { id: 'amount', header: 'Amount', cell: (d) => <Box textAlign="right">{formatMoney(d.amount)}</Box>, sortingField: 'amount', width: 120 },
           {
@@ -332,7 +332,7 @@ export default function DepositsPage() {
               ),
           },
           { id: 'account', header: 'Account', cell: (d) => d.accountName, sortingField: 'accountName', width: 220 },
-          { id: 'comment', header: 'Comment', cell: (d) => d.comment ?? '', width: 240, editConfig: textEditor('Comment', (d) => d.comment) },
+          { id: 'comment', header: 'Comment', cell: (d) => d.comment ?? '', width: 240, editConfig: textEditor('Comment', (d) => d.comment, TEXT_LIMITS.comment) },
         ])}
       />
 

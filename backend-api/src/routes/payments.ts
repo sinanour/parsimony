@@ -2,13 +2,13 @@ import { z } from 'zod';
 import { strOrNull, type Db } from '../db';
 import { badRequest, notFound } from '../http';
 import type { DueStatus, Payment, UpcomingPayment } from '../../../shared/types';
-import { idParam, isoDate, localToday, money, pagingSchema, queryObject, trimmedOrNull, type RouteModule } from './common';
+import { idParam, isoDate, localToday, money, pagingSchema, queryObject, searchText, TEXT_LIMITS, trimmedOrNull, type RouteModule } from './common';
 
 const paymentInput = z.object({
   payeeIdx: z.number().int().positive(),
   transactionDate: isoDate,
   amount: money,
-  confirmation: trimmedOrNull,
+  confirmation: trimmedOrNull(TEXT_LIMITS.confirmation),
   payerAccountIdx: z.number().int().positive(),
 });
 
@@ -17,7 +17,7 @@ const listQuery = pagingSchema.extend({
   accountIdx: z.coerce.number().int().optional(),
   from: isoDate.optional(),
   to: isoDate.optional(),
-  q: z.string().optional(),
+  q: searchText.optional(),
   sort: z.enum(['transactionDate', 'amount', 'payeeName', 'payerAccountName']).default('transactionDate'),
 });
 

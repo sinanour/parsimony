@@ -2,13 +2,13 @@ import { z } from 'zod';
 import { bool, numOrNull, strOrNull, type Db } from '../db';
 import { conflict, notFound } from '../http';
 import type { Payee } from '../../../shared/types';
-import { idParam, type RouteModule } from './common';
+import { idParam, requiredText, text, TEXT_LIMITS, type RouteModule } from './common';
 
 const payeeInput = z.object({
-  payee: z.string().trim().min(1, 'is required'),
-  accountNum: z.string().trim(),
+  payee: requiredText(TEXT_LIMITS.payee),
+  accountNum: text(TEXT_LIMITS.payeeAccountNum),
   isActive: z.boolean(),
-  payeeCategory: z.string().trim(),
+  payeeCategory: text(TEXT_LIMITS.category),
   paymentPeriod: z.number().int().min(1).max(120),
 });
 

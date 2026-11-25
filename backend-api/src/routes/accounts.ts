@@ -2,20 +2,26 @@ import { z } from 'zod';
 import { bool, numOrNull, strOrNull, type Db } from '../db';
 import { conflict, notFound } from '../http';
 import type { Account, AuthUser } from '../../../shared/types';
-import { idParam, type RouteModule } from './common';
+import { idParam, requiredText, TEXT_LIMITS, type RouteModule } from './common';
 
 const accountInput = z.object({
-  name: z.string().trim().min(1, 'is required'),
+  name: requiredText(TEXT_LIMITS.accountName),
   isCreditCard: z.boolean(),
   isCorporate: z.boolean(),
   isActive: z.boolean(),
   accountNumbers: z
-    .array(z.string().transform((s) => s.replace(/\s+/g, '')))
+    .array(
+      z
+        .string()
+        .transform((s) => s.replace(/\s+/g, ''))
+        .pipe(z.string().max(TEXT_LIMITS.accountNumber, `must be at most ${TEXT_LIMITS.accountNumber} characters`)),
+    )
+    .max(TEXT_LIMITS.accountNumbersPerAccount, `can have at most ${TEXT_LIMITS.accountNumbersPerAccount} entries`)
     .transform((a) => [...new Set(a.filter((s) => s.length > 0))]),
   statementFilePattern: z
     .string()
     .trim()
-    .max(200)
+    .max(TEXT_LIMITS.statementFilePattern)
     .nullable()
     .optional()
     .transform((s) => (s ? s.toLowerCase() : null)),

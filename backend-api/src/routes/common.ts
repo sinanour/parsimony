@@ -3,6 +3,7 @@ import type { Router } from '../http';
 import type { Db } from '../db';
 import type { Config } from '../config';
 import type { AuthService } from '../auth/service';
+import { TEXT_LIMITS } from '../../../shared/types';
 
 export interface Deps {
   db: Db;
@@ -22,11 +23,28 @@ export const idParam = z.coerce.number().int().positive();
 
 export const money = z.number().finite();
 
-export const trimmedOrNull = z
-  .string()
-  .nullable()
-  .optional()
-  .transform((s) => (s === undefined ? undefined : s === null || s.trim() === '' ? null : s.trim()));
+export { TEXT_LIMITS };
+
+const tooLong = (max: number) => `must be at most ${max} characters`;
+
+/** A required, trimmed string of at most `max` characters (see TEXT_LIMITS). */
+export const requiredText = (max: number) => z.string().trim().min(1, 'is required').max(max, tooLong(max));
+
+/** A trimmed string of at most `max` characters; empty is allowed. */
+export const text = (max: number) => z.string().trim().max(max, tooLong(max));
+
+/** An optional, nullable, trimmed string of at most `max` characters; blank becomes null. */
+export const trimmedOrNull = (max: number) =>
+  z
+    .string()
+    .trim()
+    .max(max, tooLong(max))
+    .nullable()
+    .optional()
+    .transform((s) => (s === undefined ? undefined : s === null || s === '' ? null : s));
+
+/** Free-text search / filter query parameters. */
+export const searchText = z.string().max(TEXT_LIMITS.search, tooLong(TEXT_LIMITS.search));
 
 export const scopeSchema = z.enum(['personal', 'corporate', 'all']).default('all');
 

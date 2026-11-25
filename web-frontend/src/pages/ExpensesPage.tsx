@@ -16,7 +16,7 @@ import Select, { type SelectProps } from '@cloudscape-design/components/select';
 import SpaceBetween from '@cloudscape-design/components/space-between';
 import StatusIndicator from '@cloudscape-design/components/status-indicator';
 import Table, { type TableProps } from '@cloudscape-design/components/table';
-import { UNCATEGORIZED, type Expense, type Scope } from '../../../shared/types';
+import { TEXT_LIMITS, UNCATEGORIZED, type Expense, type Scope } from '../../../shared/types';
 import { api } from '../api/client';
 import { AccountSelect, CategoryInput, ConfirmModal, EmptyState, editableColumns } from '../components/common';
 import { TransactionFilters } from '../components/TransactionFilters';
@@ -206,7 +206,7 @@ function AddExpenseModal({ visible, onDismiss, onDone }: { visible: boolean; onD
             <DatePicker value={date} onChange={(e) => setDate(e.detail.value)} placeholder="YYYY/MM/DD" />
           </FormField>
           <FormField label="Description" errorText={submitted ? errors.description : undefined}>
-            <Input value={description} onChange={(e) => setDescription(e.detail.value)} />
+            <Input value={description} onChange={(e) => setDescription(e.detail.value)} nativeInputAttributes={{ maxLength: TEXT_LIMITS.description }} />
           </FormField>
           <FormField label="Amount" errorText={submitted ? errors.amount : undefined}>
             <Input value={amount} onChange={(e) => setAmount(e.detail.value)} inputMode="decimal" />
@@ -218,7 +218,7 @@ function AddExpenseModal({ visible, onDismiss, onDone }: { visible: boolean; onD
             <Input value={exemption} onChange={(e) => setExemption(e.detail.value)} inputMode="decimal" />
           </FormField>
           <FormField label="Comment" constraintText="Optional">
-            <Input value={comment} onChange={(e) => setComment(e.detail.value)} />
+            <Input value={comment} onChange={(e) => setComment(e.detail.value)} nativeInputAttributes={{ maxLength: TEXT_LIMITS.comment }} />
           </FormField>
         </SpaceBetween>
       </Form>
@@ -441,7 +441,12 @@ export default function ExpensesPage() {
               editIconAriaLabel: 'editable',
               errorIconAriaLabel: 'Comment error',
               editingCell: (item, { currentValue, setValue }) => (
-                <Input autoFocus value={(currentValue as string | undefined) ?? item.comment ?? ''} onChange={(e) => setValue(e.detail.value)} />
+                <Input
+                  autoFocus
+                  value={(currentValue as string | undefined) ?? item.comment ?? ''}
+                  onChange={(e) => setValue(e.detail.value)}
+                  nativeInputAttributes={{ maxLength: TEXT_LIMITS.comment }}
+                />
               ),
             },
           },

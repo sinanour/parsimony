@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { Db } from '../db';
 import { badRequest, Reply } from '../http';
+import { TEXT_LIMITS } from '../../../shared/types';
 import type { CorporateReport, CorporateRow, CoverageRow, DashboardData, DateRange, HuquqReport, Meta, MonthlySpendingRow, PaymentTotalRow } from '../../../shared/types';
 import { upcomingPayments } from './payments';
 import { maskForRole } from './accounts';
@@ -48,17 +49,28 @@ function csvCell(v: unknown): string {
 
 export const reportRoutes: RouteModule = (r, { db }) => {
   r.get('/api/meta', (): Meta => {
-    const cats = db.all<{ is_corporate: number; category: string }>("SELECT is_corporate, category FROM vw_all_categories WHERE category <> ''");
+    // Every user loads this on sign-in. Categories longer than the stored limit can only be legacy rows
+    // written before the limit existed; leaving them out keeps one oversized value from bloating it.
+    const maxCategory = TEXT_LIMITS.category;
+    const cats = db.all<{ is_corporate: number; category: string }>(
+      "SELECT is_corporate, category FROM vw_all_categories WHERE category <> '' AND length(category) <= ?",
+      [maxCategory],
+    );
     return {
       categories: {
         personal: cats.filter((c) => !c.is_corporate).map((c) => c.category),
         corporate: cats.filter((c) => c.is_corporate).map((c) => c.category),
       },
       payeeCategories: db
-        .all<{ c: string }>("SELECT DISTINCT payee_category AS c FROM payee WHERE payee_category <> '' ORDER BY 1")
+        .all<{ c: string }>("SELECT DISTINCT payee_category AS c FROM payee WHERE payee_category <> '' AND length(payee_category) <= ? ORDER BY 1", [
+          maxCategory,
+        ])
         .map((x) => x.c),
       accounts: db
-        .all('SELECT account_idx, name, is_active, is_corporate, is_credit_card FROM account ORDER BY is_active DESC, name')
+        .all(
+          'SELECT account_idx, substr(name, 1, ?) AS name, is_active, is_corporate, is_credit_card FROM account ORDER BY is_active DESC, name',
+          [TEXT_LIMITS.accountName],
+        )
         .map((a) => ({
           accountIdx: Number(a.account_idx),
           name: String(a.name),

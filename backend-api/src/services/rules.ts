@@ -2,7 +2,7 @@
 // identical so rows categorized by the app and by the legacy script are indistinguishable.
 import type { Db } from '../db';
 import { badRequest } from '../http';
-import type { Rule, RuleInput, RuleMatch, RulePreview, RuleRunResponse, RuleRunResult } from '../../../shared/types';
+import { TEXT_LIMITS, type Rule, type RuleInput, type RuleMatch, type RulePreview, type RuleRunResponse, type RuleRunResult } from '../../../shared/types';
 
 export const AMOUNT_FLOOR = -2000000000;
 export const AMOUNT_CEIL = 2000000000;
@@ -161,15 +161,26 @@ export function runRules(db: Db, isCorporate: boolean, dryRun: boolean, matchLim
   };
 }
 
+/*
+ * Match counts are computed on every GET /api/rules and /api/rules/:id, and a LIKE costs roughly
+ * description length × filter length. The API caps both (TEXT_LIMITS), so only legacy rows written before
+ * the caps can exceed them: such rules report 0 matches and such descriptions are not counted, so one
+ * oversized value can't make a shared read expensive. Previews skip such descriptions too; running the
+ * rules still applies them as written.
+ */
+const MAX_FILTER = TEXT_LIMITS.ruleFilter;
+const MAX_DESCRIPTION = TEXT_LIMITS.description;
+
 /** Per-rule match counts against currently uncategorized expenses, each rule evaluated on its own. */
 export function matchCounts(db: Db): Map<number, number> {
   const rows = db.all<{ idx: number; n: number }>(
     `WITH u AS MATERIALIZED (
        SELECT e.description, e.amount, a.is_corporate FROM expense e JOIN account a USING (account_idx)
-       WHERE e.category IS NULL)
+       WHERE e.category IS NULL AND length(e.description) <= ${MAX_DESCRIPTION})
      SELECT r.expense_categorization_rule_idx AS idx, COUNT(u.amount) AS n
      FROM expense_categorization_rule r
      LEFT JOIN u ON u.is_corporate = r.is_corporate
+       AND length(r.description_filter) <= ${MAX_FILTER}
        AND u.description LIKE (CASE WHEN instr(r.description_filter, '%') > 0 OR instr(r.description_filter, '_') > 0
                                     THEN r.description_filter ELSE '%' || r.description_filter || '%' END)
        AND u.amount >= COALESCE(r.minimum_amount, ${AMOUNT_FLOOR})
@@ -181,7 +192,11 @@ export function matchCounts(db: Db): Map<number, number> {
 
 /** One rule's match count against currently uncategorized expenses (what matchCounts reports for it). */
 export function matchCount(db: Db, rule: RuleRow): number {
-  return db.scalar<number>(`SELECT COUNT(*) FROM expense WHERE ${RULE_PREDICATE}`, compileRule(rule).bindValues);
+  if (rule.description_filter.length > MAX_FILTER) return 0;
+  return db.scalar<number>(
+    `SELECT COUNT(*) FROM expense WHERE ${RULE_PREDICATE} AND length(description) <= ${MAX_DESCRIPTION}`,
+    compileRule(rule).bindValues,
+  );
 }
 
 export function previewRule(db: Db, input: Pick<RuleInput, 'descriptionFilter' | 'minimumAmount' | 'maximumAmount' | 'isCorporate'>, limit = 200): RulePreview {
@@ -194,7 +209,7 @@ export function previewRule(db: Db, input: Pick<RuleInput, 'descriptionFilter' |
     exemption: null,
     is_corporate: input.isCorporate ? 1 : 0,
   });
-  const where = `e.expense_idx IN (SELECT expense_idx FROM expense WHERE ${RULE_PREDICATE})`;
+  const where = `e.expense_idx IN (SELECT expense_idx FROM expense WHERE ${RULE_PREDICATE} AND length(description) <= ${MAX_DESCRIPTION})`;
   const total = db.scalar<number>(`SELECT COUNT(*) FROM expense e WHERE ${where}`, c.bindValues);
   const items = db.all<RuleMatch>(`${MATCH_SELECT} WHERE ${where} ORDER BY e.transaction_date DESC LIMIT ${limit}`, c.bindValues);
   return { total, items };
