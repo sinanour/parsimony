@@ -197,9 +197,18 @@ export const reportRoutes: RouteModule = (r, { db }) => {
 
   r.put('/api/reports/corporate/range', ({ body }) => setRange(db, 'corporate_date_range', body));
 
-  r.get('/api/reports/payment-totals', (): PaymentTotalRow[] =>
-    db.all('SELECT * FROM vw_payment_totals').map((x) => ({ year: String(x.payment_year), recipient: String(x.recipient), total: Math.round(Number(x.total) * 100) / 100 })),
-  );
+  // Same grouping as vw_payment_totals, restricted by the paying account's scope.
+  r.get('/api/reports/payment-totals', ({ query }): PaymentTotalRow[] => {
+    const q = z.object({ scope: scopeSchema }).parse(queryObject(query));
+    return db
+      .all(
+        `SELECT strftime('%Y', p.transaction_date) AS payment_year, pe.payee AS recipient, SUM(p.amount) AS total
+         FROM payment p JOIN payee pe USING (payee_idx) JOIN account a USING (account_idx)
+         WHERE ${scopeClause(q.scope)}
+         GROUP BY 1, 2 ORDER BY 1, 2`,
+      )
+      .map((x) => ({ year: String(x.payment_year), recipient: String(x.recipient), total: Math.round(Number(x.total) * 100) / 100 }));
+  });
 
   r.get('/api/reports/coverage', () => coverage(db));
 };

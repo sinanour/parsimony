@@ -350,6 +350,13 @@ describe('reports', () => {
   });
   test('other reports', async () => {
     assert.ok((await api('GET', '/api/reports/payment-totals')).data.length > 0);
+    const sumAll = (rows: any[]) => Math.round(rows.reduce((s, r) => s + r.total, 0) * 100);
+    const [all, personal, corporate] = await Promise.all(
+      ['all', 'personal', 'corporate'].map(async (scope) => (await api('GET', `/api/reports/payment-totals?scope=${scope}`)).data),
+    );
+    // Rows are rounded to cents individually, so allow a cent of drift per row.
+    assert.ok(Math.abs(sumAll(personal) + sumAll(corporate) - sumAll(all)) <= all.length);
+    assert.equal((await api('GET', '/api/reports/payment-totals?scope=bogus')).status, 400);
     assert.ok((await api('GET', '/api/reports/coverage')).data.length > 0);
     const m = await api('GET', '/api/reports/monthly-spending?months=12&scope=personal');
     assert.ok(m.data.length > 0 && new Set(m.data.map((r: any) => r.month)).size <= 12);

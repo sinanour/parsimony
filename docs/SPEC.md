@@ -129,7 +129,7 @@ is a separate package because only operators need it.
 ### 5.9 Reports
 * G1 — Huqúqu'lláh: edit the date range; show the payment estimate, expense summary by category and exemption class, and income by description.
 * G2 — Business: edit the date range; table of business transactions with CSV download for the accountant.
-* G3 — Payment totals by year and payee, filterable by year.
+* G3 — Payment totals by year and payee, filterable by year and by scope with a *Personal / Corporate / All* segmented control (default *All*), as on the transaction lists. Scope follows the paying account's `is_corporate` flag.
 * G4 — Statement coverage per account.
 
 ## 6. Functional requirements — users, authentication and authorization

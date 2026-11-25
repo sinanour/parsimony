@@ -37,6 +37,7 @@ import type {
   RuleInput,
   RulePreview,
   RuleRunResponse,
+  Scope,
   PdfLayoutInfo,
   StatementFormat,
   StatementFormatInput,
@@ -271,7 +272,7 @@ export const api = {
     corporate: () => request<CorporateReport>('GET', '/api/reports/corporate'),
     setCorporateRange: (r: DateRange) => request<DateRange>('PUT', '/api/reports/corporate/range', r),
     downloadCorporateCsv: () => download('/api/reports/corporate?format=csv', 'corporate-transactions.csv'),
-    paymentTotals: () => request<PaymentTotalRow[]>('GET', '/api/reports/payment-totals'),
+    paymentTotals: (scope: Scope = 'all') => request<PaymentTotalRow[]>('GET', `/api/reports/payment-totals${qs({ scope })}`),
     coverage: () => request<CoverageRow[]>('GET', '/api/reports/coverage'),
     monthlySpending: (months: number, scope: 'personal' | 'corporate') =>
       request<MonthlySpendingRow[]>('GET', `/api/reports/monthly-spending${qs({ months, scope })}`),
