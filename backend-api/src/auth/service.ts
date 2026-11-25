@@ -16,7 +16,10 @@ interface UserRow {
   display_name: string | null;
   password_hash: string;
   role: Role;
+  /** Legacy revocation instant in epoch seconds (kept up to date for older code; not read by this version). */
   tokens_invalid_before: number;
+  /** Revocation instant, epoch ms: sessions created at or before it (and their access tokens) are rejected. */
+  revoked_at_ms: number;
   last_login_at: string | null;
   created_at: string;
   updated_at: string;
@@ -29,6 +32,8 @@ interface SessionRow {
   prev_token_hash: string | null;
   rotated_at: number | null;
   expires_at: number;
+  /** Epoch ms of creation; the session is valid only while this is > the user's revoked_at_ms. */
+  created_ms: number;
 }
 
 export interface ClientInfo {
@@ -62,6 +67,10 @@ const toAuthUser = (u: UserRow): AuthUser => ({ userId: u.user_id, email: u.emai
 /** Normalises a submitted email for throttling, so case/whitespace variants share one budget. */
 const accountKey = (email: string) => email.trim().toLowerCase();
 
+/** True if the session row was created after the user's last revocation (and so may be used). */
+const sessionCurrent = (s: { created_ms: number }, u: { revoked_at_ms: number }) => s.created_ms > u.revoked_at_ms;
+
+const invalidCredentials = () => unauthorized('Incorrect email or password', 'INVALID_CREDENTIALS');
 const sessionEnded = () => unauthorized('Your session has ended. Sign in again.', 'TOKEN_REVOKED');
 const lastAdminDemote = () => conflict('This is the only administrator. Make someone else an administrator first.');
 const alreadySetUp = () => new HttpError(409, 'Parsimony is already set up', undefined, 'ALREADY_SET_UP');
@@ -133,6 +142,11 @@ export class AuthService {
   /** Creates the first administrator from ADMIN_EMAIL/ADMIN_PASSWORD, or arms a setup code. Returns the code, if any. */
   async bootstrap(): Promise<string | null> {
     this.db.run('DELETE FROM user_session WHERE expires_at < ?', [nowSeconds()]);
+    // Sessions whose account is gone or that predate its revocation can never be used again.
+    this.db.run(
+      `DELETE FROM user_session WHERE NOT EXISTS (SELECT 1 FROM app_user u WHERE u.user_id = user_session.user_id
+         AND user_session.created_ms > u.revoked_at_ms)`,
+    );
     const days = this.config.auth.auditRetentionDays;
     if (days > 0) this.db.run(`DELETE FROM audit_log WHERE at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?)`, [`-${days} days`]);
 
@@ -193,11 +207,14 @@ export class AuthService {
       if (opts.onlyIfNoUsers && this.userCount() > 0) throw alreadySetUp();
       if (this.findByEmail(email)) throw duplicate();
       try {
-        return this.db.run('INSERT INTO app_user (email, display_name, password_hash, role) VALUES (?, ?, ?, ?)', [
+        // revoked_at_ms starts at the creation instant: no session row created before the account existed
+        // (whatever its user_id) can ever authenticate as it.
+        return this.db.run('INSERT INTO app_user (email, display_name, password_hash, role, revoked_at_ms) VALUES (?, ?, ?, ?, ?)', [
           email,
           input.displayName?.trim() || null,
           hash,
           input.role,
+          Date.now(),
         ]).lastInsertRowid;
       } catch (e) {
         if (isUniqueViolation(e)) throw duplicate();
@@ -240,7 +257,7 @@ export class AuthService {
       if (!u) throw notFound('User');
       if (demotes(u) && this.adminCount() <= 1) throw lastAdminDemote();
       const hash = patch.password === undefined ? null : await this.passwords.hash(patch.password);
-      this.db.tx(() => {
+      const revoked = this.db.tx(() => {
         // Everything checked above may have changed while hashing; re-check against the committed state.
         const cur = this.reread(u);
         if (!cur) throw notFound('User');
@@ -253,16 +270,20 @@ export class AuthService {
         if (patch.role !== undefined) this.db.run('UPDATE app_user SET role = ? WHERE user_id = ?', [patch.role, id]);
         this.db.run(`UPDATE app_user SET updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE user_id = ?`, [id]);
         // A new role or password must take effect everywhere immediately.
-        if ((patch.role !== undefined && patch.role !== cur.role) || hash) this.revokeAll(id);
+        const revoke = (patch.role !== undefined && patch.role !== cur.role) || !!hash;
+        if (revoke) this.revokeAll(id);
+        return revoke;
       });
+      // Belt and braces: sign-ins re-check inside their own transaction, but sweep again after the commit too.
+      if (revoked) this.revokeAll(id);
       return this.getUser(id);
     });
   }
 
   /** Deletes the user and their sessions; returns who was deleted (for the audit log). */
   async deleteUser(id: number, actorId: number): Promise<AuthUser> {
-    return this.userLocks.run(id, () =>
-      this.db.tx(() => {
+    return this.userLocks.run(id, () => {
+      const deleted = this.db.tx(() => {
         const u = this.findById(id);
         if (!u) throw notFound('User');
         if (id === actorId) throw conflict('You cannot delete your own account');
@@ -270,8 +291,12 @@ export class AuthService {
         this.db.run('DELETE FROM user_session WHERE user_id = ?', [id]);
         this.db.run('DELETE FROM app_user WHERE user_id = ?', [id]);
         return toAuthUser(u);
-      }),
-    );
+      });
+      // Belt and braces: no session may outlive its account (sign-in also refuses to insert one for a
+      // deleted user, and authenticate/refresh reject sessions without a user).
+      this.db.run('DELETE FROM user_session WHERE user_id = ?', [id]);
+      return deleted;
+    });
   }
 
   /** Revokes all of a user's sessions, after any credential write already in flight for them. Returns the user. */
@@ -296,24 +321,29 @@ export class AuthService {
 
   // ---------- sessions ----------
 
-  /** Inserts a session row (synchronous, so it can run inside a transaction). */
+  /**
+   * Inserts a session row for an existing user. Synchronous, so callers run it inside the transaction that
+   * re-checked the account. Its created_ms is strictly after the user's current revocation instant, so it
+   * survives a revocation that the same transaction already made (changePassword) and no later one.
+   */
   private insertSession(userId: number, client: ClientInfo): { sessionId: string; secret: string } {
+    const u = this.db.get<{ revoked_at_ms: number }>('SELECT revoked_at_ms FROM app_user WHERE user_id = ?', [userId]);
+    if (!u) throw sessionEnded();
     const sessionId = randomToken(16);
     const secret = randomToken(32);
-    this.db.run('INSERT INTO user_session (session_id, user_id, token_hash, expires_at, ip, user_agent) VALUES (?, ?, ?, ?, ?, ?)', [
-      sessionId,
-      userId,
-      sha256(secret),
-      nowSeconds() + this.config.auth.refreshTokenTtl,
-      client.ip,
-      client.userAgent?.slice(0, 300) ?? null,
-    ]);
+    this.db.run(
+      'INSERT INTO user_session (session_id, user_id, token_hash, expires_at, ip, user_agent, created_ms) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      [
+        sessionId,
+        userId,
+        sha256(secret),
+        nowSeconds() + this.config.auth.refreshTokenTtl,
+        client.ip,
+        client.userAgent?.slice(0, 300) ?? null,
+        Math.max(Date.now(), Number(u.revoked_at_ms) + 1),
+      ],
+    );
     return { sessionId, secret };
-  }
-
-  private async issue(user: UserRow, client: ClientInfo): Promise<IssuedSession> {
-    const { sessionId, secret } = this.insertSession(user.user_id, client);
-    return { session: await this.accessFor(user, sessionId), refreshToken: `${sessionId}.${secret}` };
   }
 
   private async accessFor(user: UserRow, sessionId: string): Promise<AuthSession> {
@@ -355,8 +385,24 @@ export class AuthService {
     this.loginIpLimiter.allow(ipKey);
 
     // Hash even when the user doesn't exist so response time doesn't reveal which emails are registered.
-    const ok = await verifyPassword(password, user?.password_hash ?? (await dummyHash()));
-    if (!user || !ok) {
+    const ok = await this.passwords.verify(password, user?.password_hash ?? (await dummyHash()));
+    // The account may have been deleted, its password reset or its sessions revoked (e.g. a role change) while
+    // the hash ran. Re-check against the committed row and create the session in the same transaction, so a
+    // revocation either lands first (and this sign-in fails) or after (and removes this session).
+    const issued = user && ok ? this.db.tx(() => {
+      const cur = this.reread(user);
+      if (!cur || cur.password_hash !== user.password_hash || cur.revoked_at_ms !== user.revoked_at_ms) return null;
+      this.db.run(`UPDATE app_user SET last_login_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE user_id = ?`, [cur.user_id]);
+      return { user: cur, ...this.insertSession(cur.user_id, client) };
+    }) : null;
+    if (user && ok && !issued) {
+      // Not a guess, so it neither counts towards the lockout nor spends the IP budget.
+      this.loginLockout.succeed(account);
+      this.loginIpLimiter.refund(ipKey);
+      this.audit({ action: 'auth.login_failed', user: who, ip: client.ip, details: 'Account changed during sign-in (deleted, password reset or sessions revoked)' });
+      throw invalidCredentials();
+    }
+    if (!issued) {
       const streak = failure.failures > 1 ? ` (${failure.failures} consecutive failures)` : '';
       this.audit({
         action: 'auth.login_failed',
@@ -372,13 +418,12 @@ export class AuthService {
           details: `${shownEmail} locked for ${Math.round(failure.lockMs / 1000)} s after ${failure.failures} consecutive failures`,
         });
       }
-      throw unauthorized('Incorrect email or password', 'INVALID_CREDENTIALS');
+      throw invalidCredentials();
     }
     this.loginLockout.succeed(account);
     this.loginIpLimiter.refund(ipKey);
-    this.db.run(`UPDATE app_user SET last_login_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE user_id = ?`, [user.user_id]);
-    this.audit({ action: 'auth.login', user: toAuthUser(user), ip: client.ip });
-    return this.issue(user, client);
+    this.audit({ action: 'auth.login', user: toAuthUser(issued.user), ip: client.ip });
+    return { session: await this.accessFor(issued.user, issued.sessionId), refreshToken: `${issued.sessionId}.${issued.secret}` };
   }
 
   async setup(code: string, input: { email: string; password: string; displayName?: string | null }, client: ClientInfo): Promise<IssuedSession> {
@@ -391,7 +436,8 @@ export class AuthService {
     const user = await this.createUser({ ...input, role: 'ADMINISTRATOR' }, { onlyIfNoUsers: true });
     this.setupCode = null;
     this.audit({ action: 'auth.setup', user, ip: client.ip });
-    return this.issue(this.findById(user.userId)!, client);
+    const { sessionId, secret } = this.db.tx(() => this.insertSession(user.userId, client));
+    return { session: await this.accessFor(this.findById(user.userId)!, sessionId), refreshToken: `${sessionId}.${secret}` };
   }
 
   /** Rotates the refresh token. Presenting an already-rotated token revokes the session (likely theft). */
@@ -416,7 +462,11 @@ export class AuthService {
       throw unauthorized('Your session has ended. Sign in again.', 'SESSION_EXPIRED');
     }
     const user = this.findById(s.user_id);
-    if (!user) throw unauthorized('Your session has ended. Sign in again.', 'SESSION_EXPIRED');
+    // Defence in depth: a session whose account is gone, or that predates the account's last revocation, is dead.
+    if (!user || !sessionCurrent(s, user)) {
+      this.db.run('DELETE FROM user_session WHERE session_id = ?', [sessionId]);
+      throw unauthorized('Your session has ended. Sign in again.', 'SESSION_REVOKED');
+    }
     const presented = sha256(secret);
 
     if (safeEqual(presented, s.token_hash)) {
@@ -447,10 +497,19 @@ export class AuthService {
     this.audit({ action: 'auth.logout', user: u ? toAuthUser(u) : null, ip: client.ip });
   }
 
-  /** Revokes every session of the user and rejects access tokens issued until now. */
+  /**
+   * Revokes every session of the user: deletes the rows and moves the revocation instant (epoch ms) to now,
+   * strictly past the previous instant and every session that existed, so nothing created up to this point,
+   * even in the same millisecond, is accepted again. Sessions inserted afterwards get a later created_ms.
+   */
   revokeAll(userId: number): void {
-    this.db.run('DELETE FROM user_session WHERE user_id = ?', [userId]);
-    this.db.run('UPDATE app_user SET tokens_invalid_before = ? WHERE user_id = ?', [nowSeconds(), userId]);
+    this.db.tx(() => {
+      const newest = this.db.scalar<number | null>('SELECT MAX(created_ms) FROM user_session WHERE user_id = ?', [userId]) ?? 0;
+      this.db.run('DELETE FROM user_session WHERE user_id = ?', [userId]);
+      this.db.run('UPDATE app_user SET revoked_at_ms = MAX(?, revoked_at_ms + 1, ?) WHERE user_id = ?', [Date.now(), Number(newest), userId]);
+      // The legacy seconds column, so a rolled-back server still rejects tokens issued before this second.
+      this.db.run('UPDATE app_user SET tokens_invalid_before = revoked_at_ms / 1000 WHERE user_id = ?', [userId]);
+    });
   }
 
   /** Validates the bearer token on a request. Returns null without a token; throws 401 for a bad one. */
@@ -462,12 +521,15 @@ export class AuthService {
     const claims = await this.signer.verifyAccess(m[1]);
     if (!claims) throw unauthorized('Your session has expired', 'TOKEN_EXPIRED');
     const user = this.findById(claims.userId);
-    if (!user || claims.issuedAt < user.tokens_invalid_before) throw unauthorized('Your session has ended. Sign in again.', 'TOKEN_REVOKED');
-    const s = this.db.get<{ expires_at: number }>('SELECT expires_at FROM user_session WHERE session_id = ? AND user_id = ?', [
-      claims.sessionId,
-      user.user_id,
-    ]);
-    if (!s || s.expires_at <= nowSeconds()) throw unauthorized('Your session has ended. Sign in again.', 'TOKEN_REVOKED');
+    // An access token is only as good as its session row: it must exist, belong to this (existing) user and
+    // have been created strictly after the user's last revocation. That comparison is in ms (the token's own
+    // `iat` is whole seconds, too coarse: a token minted in the same second as a revocation used to survive it).
+    if (!user) throw sessionEnded();
+    const s = this.db.get<{ expires_at: number; created_ms: number }>(
+      'SELECT expires_at, created_ms FROM user_session WHERE session_id = ? AND user_id = ?',
+      [claims.sessionId, user.user_id],
+    );
+    if (!s || s.expires_at <= nowSeconds() || !sessionCurrent(s, user)) throw sessionEnded();
     return toAuthUser(user);
   }
 
@@ -480,7 +542,7 @@ export class AuthService {
     // to set a password and hand out a fresh session.
     const start = this.findById(userId);
     if (!start) throw sessionEnded();
-    const unchanged = (row: UserRow | undefined): row is UserRow => !!row && row.tokens_invalid_before === start.tokens_invalid_before;
+    const unchanged = (row: UserRow | undefined): row is UserRow => !!row && row.revoked_at_ms === start.revoked_at_ms;
     return this.userLocks.run(userId, async () => {
       const u = this.reread(start);
       if (!unchanged(u)) throw sessionEnded();
@@ -496,7 +558,7 @@ export class AuthService {
         if (r.changes === 0) throw conflict('Your password was changed meanwhile. Sign in again and retry.');
         this.revokeAll(userId);
         // The replacement session is created in the same transaction, so any later revocation removes it too.
-        // Tokens issued in the same second as the revocation are still valid, so it works immediately.
+        // insertSession stamps it strictly after the revocation just made, so it works immediately.
         return this.insertSession(userId, client);
       });
       const fresh = this.findById(userId)!;

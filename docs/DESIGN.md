@@ -87,9 +87,11 @@ go to the server log only.
 (15 minutes by default). The refresh token is opaque: `<sessionId>.<secret>`. Only `SHA-256(secret)` is
 stored, in `user_session.token_hash`.
 
-**Every authenticated request** checks the JWT signature and expiry, that the user exists, that
-`iat ≥ tokens_invalid_before`, and that the session in `sid` still exists and hasn't expired. Revoking
-a session therefore takes effect immediately, not when the access token expires.
+**Every authenticated request** checks the JWT signature and expiry, that the user exists, and that the
+session in `sid` still exists for that user, hasn't expired and was created strictly after the user's
+revocation instant (`user_session.created_ms > app_user.revoked_at_ms`, both epoch milliseconds; the JWT's
+whole-second `iat` is too coarse). Revoking a session therefore takes effect immediately, not when the
+access token expires. Refresh applies the same session checks and deletes a session that fails them.
 
 **Refresh** (`POST /api/auth/refresh`, cookie only):
 
@@ -103,16 +105,30 @@ a session therefore takes effect immediately, not when the access token expires.
 request was HTTPS. With `COOKIE_SECURE=auto`, that means the socket is TLS, or `TRUST_PROXY=true` and
 `X-Forwarded-Proto: https`.
 
-**Revocation** — `revokeAll(user)` deletes the user's sessions and sets `tokens_invalid_before = now`.
-It's used by sign-out-everywhere, password change and reset, role change, and admin password reset. A
-password change then issues a fresh session for the current browser.
+**Revocation** — `revokeAll(user)` deletes the user's sessions and moves `revoked_at_ms` to now, but
+strictly past its previous value and every deleted session's `created_ms`, so nothing created up to that
+point is accepted even within the same millisecond. A new session is stamped
+`created_ms = max(now, revoked_at_ms + 1)`, so the fresh session a password change (or first-run setup)
+issues right after its own revocation works. The legacy `tokens_invalid_before` (seconds) is still written
+for older code after a rollback. `revokeAll` is used by sign-out-everywhere, password change and reset,
+role change and admin password reset; admin edits and deletion sweep the user's sessions once more after
+committing. A new account's `revoked_at_ms` starts at its creation instant, and startup deletes sessions
+whose user is gone or that predate its revocation.
+
+**Sign-in** — the account is read, the password verified (scrypt, which yields the event loop), and then,
+in one transaction, the account is re-read and the session inserted only if it still exists with the same
+`user_id`/`created_at`, the same `password_hash` that was verified and an unchanged `revoked_at_ms`.
+Otherwise the sign-in is a 401 (audited as `auth.login_failed`, not counted towards the lockout). A
+deletion, password reset or role change therefore either lands first and the sign-in fails, or lands
+after and removes the new session. Sign-in doesn't take the per-user lock, so a slow sign-in never delays
+an administrator's action.
 
 **Credential writes** — password change, password reset, admin edits (role/password/name), user deletion
 and session revocation for one user are serialised by an in-process per-user lock (`auth/locks.ts`) held
 across the precondition check, the scrypt hash (which yields the event loop) and the write. Because the
 `users` CLI runs in another process, each writer also re-checks inside its write transaction: the row still
 exists with the same `user_id` *and* `created_at`; the password hash is still the one that was verified
-(`UPDATE … WHERE password_hash = ?`, else 409); a password change refuses (401) if `tokens_invalid_before`
+(`UPDATE … WHERE password_hash = ?`, else 409); a password change refuses (401) if `revoked_at_ms`
 moved since the request arrived, and inserts its replacement session in the same transaction so a later
 revocation removes it; the last-administrator guard is re-evaluated; and duplicate emails (including a
 UNIQUE violation) are 409. `app_user.user_id` is `AUTOINCREMENT` (migration 004), seeded past every id seen
@@ -196,6 +212,9 @@ cent) and description exists, counting multiplicity. Deposits match on account, 
   `account.statement_file_pattern`.
 * `003_statement_formats.sql` — `statement_format`, seeded with the formats previously hard-coded in
   the Python parser.
+* `004_user_id_autoincrement.sql` — rebuilds `app_user` with `AUTOINCREMENT` ids (never reused).
+* `005_revocation_ms.sql` — adds `app_user.revoked_at_ms` and `user_session.created_ms` (converted from
+  the existing second/ISO values) and drops sessions that are orphaned or not after their revocation.
 
 New migrations are new files; applied files are never edited. Rolling back a deployment doesn't undo
 migrations, so migrations must stay additive: older code must keep working on the newer schema.

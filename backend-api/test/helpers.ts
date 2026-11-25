@@ -117,3 +117,45 @@ export function refreshCookie(headers: Headers): string | null {
   const pair = c.split(';')[0];
   return pair === 'parsimony_refresh=' ? '' : pair;
 }
+
+// ---------- deterministic races ----------
+
+export interface Hold {
+  entered: Promise<void>;
+  release: () => void;
+}
+
+/** Lets a test pause the hash/verify of a given plaintext until it calls `release()`. */
+export function gate(t: TestApp) {
+  const real = { ...t.app.auth.passwords };
+  const held = new Map<string, { enter: () => void; released: Promise<void> }>();
+  const wrap =
+    <A extends unknown[], R>(fn: (pw: string, ...rest: A) => Promise<R>) =>
+    async (pw: string, ...rest: A): Promise<R> => {
+      const g = held.get(pw);
+      if (g) {
+        held.delete(pw);
+        g.enter();
+        await g.released;
+      }
+      return fn(pw, ...rest);
+    };
+  t.app.auth.passwords.hash = wrap(real.hash);
+  t.app.auth.passwords.verify = wrap(real.verify);
+  return (pw: string): Hold => {
+    let enter!: () => void;
+    let release!: () => void;
+    const entered = new Promise<void>((r) => (enter = r));
+    const released = new Promise<void>((r) => (release = r));
+    held.set(pw, { enter, released });
+    return { entered, release };
+  };
+}
+
+export async function waitFor(cond: () => boolean, what: string): Promise<void> {
+  const deadline = Date.now() + 5000;
+  while (!cond()) {
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+    await new Promise((r) => setTimeout(r, 5));
+  }
+}

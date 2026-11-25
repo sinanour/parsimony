@@ -19,6 +19,14 @@ import { migrate } from '../migrations';
 import { hashPassword, passwordSchema } from '../auth/passwords';
 import { ROLES, type Role } from '../../../shared/types';
 
+/**
+ * Sets a user's revocation instant (epoch ms, as AuthService.revokeAll): now, but strictly after the previous
+ * instant and every existing session of the user, so the server rejects all of them even within the same ms.
+ */
+const REVOKE_NOW = `revoked_at_ms = MAX(CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER), revoked_at_ms + 1,
+  COALESCE((SELECT MAX(s.created_ms) FROM user_session s WHERE s.user_id = app_user.user_id), 0)),
+  tokens_invalid_before = strftime('%s', 'now')`;
+
 function fail(msg: string): never {
   console.error(msg);
   process.exit(1);
@@ -91,7 +99,7 @@ async function main() {
       const r = role();
       if (db.get('SELECT 1 FROM app_user WHERE email = ?', [e])) fail(`${e} already exists; use reset-password or set-role.`);
       const hash = await newPassword();
-      db.run('INSERT INTO app_user (email, display_name, password_hash, role) VALUES (?, ?, ?, ?)', [e, values.name ?? null, hash, r]);
+      db.run('INSERT INTO app_user (email, display_name, password_hash, role, revoked_at_ms) VALUES (?, ?, ?, ?, ?)', [e, values.name ?? null, hash, r, Date.now()]);
       audit('cli.user_create', `${e} as ${r}`);
       console.log(`Created ${e} (${r}).`);
       break;
@@ -101,7 +109,7 @@ async function main() {
       if (!db.get('SELECT 1 FROM app_user WHERE email = ?', [e])) fail(`No user ${e}.`);
       const hash = await newPassword();
       db.tx(() => {
-        db.run(`UPDATE app_user SET password_hash = ?, tokens_invalid_before = strftime('%s', 'now'), updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE email = ?`, [hash, e]);
+        db.run(`UPDATE app_user SET password_hash = ?, ${REVOKE_NOW}, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE email = ?`, [hash, e]);
         db.run('DELETE FROM user_session WHERE user_id = (SELECT user_id FROM app_user WHERE email = ?)', [e]);
       });
       audit('cli.password_reset', e);
@@ -116,7 +124,7 @@ async function main() {
         fail('That is the only administrator.');
       }
       db.tx(() => {
-        db.run(`UPDATE app_user SET role = ?, tokens_invalid_before = strftime('%s', 'now') WHERE email = ?`, [r, e]);
+        db.run(`UPDATE app_user SET role = ?, ${REVOKE_NOW} WHERE email = ?`, [r, e]);
         db.run('DELETE FROM user_session WHERE user_id = (SELECT user_id FROM app_user WHERE email = ?)', [e]);
       });
       audit('cli.set_role', `${e} → ${r}`);

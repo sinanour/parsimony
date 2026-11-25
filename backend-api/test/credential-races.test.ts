@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { ADMIN, refreshCookie, startApp, type TestApp } from './helpers';
+import { ADMIN, gate, refreshCookie, startApp, waitFor, type TestApp } from './helpers';
 import { Db } from '../src/db';
 import { listMigrations, migrate } from '../src/migrations';
 import { hashPassword } from '../src/auth/passwords';
@@ -12,46 +12,6 @@ import { KeyedMutex } from '../src/auth/locks';
 // Regression tests for pentest finding 2 (2026-11-24): credential writes checked preconditions, yielded the
 // event loop for scrypt, then wrote by a (reusable) numeric user id with nothing serialising the halves.
 // Hashing is held in flight deterministically by gating `auth.passwords` on specific plaintexts.
-
-interface Hold {
-  entered: Promise<void>;
-  release: () => void;
-}
-
-/** Lets a test pause the hash/verify of a given plaintext until it calls `release()`. */
-function gate(t: TestApp) {
-  const real = { ...t.app.auth.passwords };
-  const held = new Map<string, { enter: () => void; released: Promise<void> }>();
-  const wrap =
-    <A extends unknown[], R>(fn: (pw: string, ...rest: A) => Promise<R>) =>
-    async (pw: string, ...rest: A): Promise<R> => {
-      const g = held.get(pw);
-      if (g) {
-        held.delete(pw);
-        g.enter();
-        await g.released;
-      }
-      return fn(pw, ...rest);
-    };
-  t.app.auth.passwords.hash = wrap(real.hash);
-  t.app.auth.passwords.verify = wrap(real.verify);
-  return (pw: string): Hold => {
-    let enter!: () => void;
-    let release!: () => void;
-    const entered = new Promise<void>((r) => (enter = r));
-    const released = new Promise<void>((r) => (release = r));
-    held.set(pw, { enter, released });
-    return { entered, release };
-  };
-}
-
-async function waitFor(cond: () => boolean, what: string): Promise<void> {
-  const deadline = Date.now() + 5000;
-  while (!cond()) {
-    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
-    await new Promise((r) => setTimeout(r, 5));
-  }
-}
 
 async function withApp(fn: (t: TestApp, adminToken: string, hold: ReturnType<typeof gate>) => Promise<void>): Promise<void> {
   const t = await startApp();
@@ -118,7 +78,7 @@ describe('credential writes are serialised per user', () => {
       await h.entered;
       // What `npm run users -- reset-password` does from another process (no shared lock).
       const cliHash = await hashPassword('chosen-by-cli-1');
-      t.app.db.run(`UPDATE app_user SET password_hash = ?, tokens_invalid_before = strftime('%s', 'now') WHERE user_id = ?`, [cliHash, id]);
+      t.app.db.run(`UPDATE app_user SET password_hash = ?, revoked_at_ms = ? WHERE user_id = ?`, [cliHash, Date.now(), id]);
       t.app.db.run('DELETE FROM user_session WHERE user_id = ?', [id]);
       h.release();
 
