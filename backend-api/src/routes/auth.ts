@@ -48,7 +48,8 @@ export const authRoutes: RouteModule = (r, deps) => {
   const pub = { access: 'public', audit: false, limit: 'auth', redact: false } as const;
   /**
    * Public routes that throttle themselves on something callers can't share or spend for each other:
-   * login (per submitted account + per-IP *failures*), refresh (per presented session), logout (no-op without a cookie).
+   * login (per submitted account + per-IP *failures*), refresh (per session, counted only for callers holding one of
+   * its secrets), logout (no-op without the full cookie).
    */
   const selfThrottled = { access: 'public', audit: false, redact: false } as const;
 
@@ -91,7 +92,8 @@ export const authRoutes: RouteModule = (r, deps) => {
       try {
         return respond(ctx, deps, await auth.refresh(token, client(ctx)));
       } catch (e) {
-        // Being throttled doesn't end the session; keep the cookie so the next attempt can succeed.
+        // Being throttled doesn't end the session; keep the cookie so the next attempt can succeed. (Only
+        // reached with a cookie present: a request without one never gets a cookie-clearing header.)
         if (!(e instanceof HttpError && e.status === 429)) setRefreshCookie(ctx, deps, null);
         throw e;
       }
@@ -102,8 +104,11 @@ export const authRoutes: RouteModule = (r, deps) => {
   r.post(
     '/api/auth/logout',
     (ctx) => {
-      auth.logout(readCookie(ctx, REFRESH_COOKIE), client(ctx));
-      setRefreshCookie(ctx, deps, null);
+      const token = readCookie(ctx, REFRESH_COOKIE);
+      // Ends the session only if the cookie's secret checks out; 204 regardless.
+      auth.logout(token, client(ctx));
+      // Only clear a cookie the request actually carried (a request without one has nothing to sign out).
+      if (token !== undefined) setRefreshCookie(ctx, deps, null);
     },
     selfThrottled,
   );

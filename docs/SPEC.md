@@ -64,7 +64,7 @@ is a separate package because only operators need it.
 | Huqúqu'lláh period | `huquq_date_range` | Single row. Drives `vw_huquq_*` and `vw_expense_summary_for_date_range` (19% of income less exemptions). |
 | Business (corporate) period | `corporate_date_range` | Single row. Drives `vw_corporate_transactions_for_date_range` (accountant export). |
 | User | `app_user` | Email (unique, case-insensitive), display name, password hash, role, revocation instant (`revoked_at_ms`, plus legacy `tokens_invalid_before` in seconds), timestamps. User ids are never reused after a deletion. |
-| Session | `user_session` | One row per signed-in browser: hashed refresh token, creation instant (ms), expiry, last use, IP and user agent. |
+| Session | `user_session` | One row per signed-in browser: hashed refresh token (plus a bounded history of rotated-away hashes, for reuse detection), the random key its access tokens carry, creation instant (ms), expiry, last use, IP and user agent. |
 | Audit entry | `audit_log` | Who did what and when: auth events, user administration and every data-changing API call. |
 | Schema version | `schema_migrations` | Migrations that have been applied. |
 
@@ -153,8 +153,8 @@ is a separate package because only operators need it.
 ### 6.3 Sign-in and sessions
 * U6 — Users sign in with email and password. A failed sign-in gets the same error whether the email exists or not.
 * U7 — A successful sign-in creates a session: a short-lived **access token** (JWT, 15 minutes by default) returned to the page and kept in memory only, plus a long-lived **refresh token** (7 days by default, rotated on every use) in an `HttpOnly`, `SameSite=Strict` cookie scoped to `/api/auth`, marked `Secure` whenever the request arrived over HTTPS.
-* U8 — The page silently refreshes the access token before it expires and after a reload. If a refresh token is presented that has already been rotated away (possible theft), the whole session is revoked.
-* U9 — Sign out revokes the current session. "Sign out everywhere" revokes all of the user's sessions and invalidates their outstanding access tokens.
+* U8 — The page silently refreshes the access token before it expires and after a reload. If a refresh token is presented that has already been rotated away (possible theft), the whole session is revoked. Any other wrong refresh token is simply refused, without affecting the session, and gets the same answer as an unknown or expired one. Access tokens don't contain the session id or anything that could be used as (part of) a refresh token.
+* U9 — Sign out revokes the current session — only when the request presents that session's full, current refresh token; otherwise it does nothing (and still answers 204). Sign-out and a failed refresh clear the refresh cookie only if the request carried one. "Sign out everywhere" revokes all of the user's sessions and invalidates their outstanding access tokens.
 * U10 — Changing a password, changing a role, or an administrator resetting a password revokes all of that user's sessions.
 * U10a — Concurrent changes to one user's credentials take effect in the order they were made: an administrator's "sign out all sessions", password reset or deletion always wins over a password change that was already in progress (the session that change handed out is revoked too), and a change never lands on a different account.
 * U10b — A sign-in that is in progress when the account is deleted, its password reset, its role changed or its sessions revoked fails (401) and leaves no session; a sign-in never issues a session that such a change made before it completed would have revoked.
@@ -169,7 +169,7 @@ is a separate package because only operators need it.
 ### 6.5 Abuse protection and audit
 * U16 — Abuse limits, none of which one caller can spend on another's behalf. Exceeding a limit returns 429 with `Retry-After`; throttled attempts are audited (at most one row per key per minute).
   * Sign-in: after 5 consecutive failures for an email (registered or not, so a lock reveals nothing) it is locked for 1 minute, doubling with each further failure up to 15 minutes; a successful sign-in clears the streak. Separately, each client IP may fail at most 100 sign-ins per minute; successful sign-ins never count. Failed sign-ins for a registered email are audited against that user.
-  * Refresh: limited per session (default 30/minute); requests without the refresh cookie are rejected before any limit is counted. Sign-out is not rate-limited.
+  * Refresh: limited per session (default 30/minute), counting only requests that present one of the session's own refresh secrets; requests without the refresh cookie are rejected before any limit is counted. Sign-out is not rate-limited.
   * Setup and password-reset endpoints: per client IP (default 10 requests/minute); password change: per user.
   * Other API calls are rate-limited per user (default 600/minute). Expensive ones — statement parse and commit, rule runs and dry runs, statement-format writes — also share a smaller per-user budget (default 30/minute).
 * U17 — The audit log records sign-in success and failure, sign-out, password changes and resets, user administration, and every data-changing request (user, method, path, status, IP, time). Administrators can browse it in the UI. Entries older than `AUDIT_RETENTION_DAYS` (default 365) are pruned at startup.

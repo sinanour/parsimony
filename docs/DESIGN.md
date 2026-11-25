@@ -149,12 +149,16 @@ SELECT 'payee', payee_idx, length(payee), length(payee_category) FROM payee
 
 ### 2.4 Authentication
 
-**Tokens.** The access token is an HS256 JWT `{ sub: userId, sid: sessionId, typ: 'access', iat, exp }`
+**Tokens.** The access token is an HS256 JWT `{ sub: userId, sk: accessKey, typ: 'access', iat, exp }`
 (15 minutes by default). The refresh token is opaque: `<sessionId>.<secret>`. Only `SHA-256(secret)` is
-stored, in `user_session.token_hash`.
+stored, in `user_session.token_hash`. `sk` is the session's `user_session.access_key`, a random value
+unrelated to the session id, so an access token (even a leaked, expired one) never reveals any part of the
+refresh cookie. Tokens from before migration 007 carried the raw session id as `sid`; they are refused as
+`TOKEN_EXPIRED`, which the SPA answers by refreshing with its cookie (sessions without an access key get one
+on that refresh).
 
 **Every authenticated request** checks the JWT signature and expiry, that the user exists, and that the
-session in `sid` still exists for that user, hasn't expired and was created strictly after the user's
+session whose `access_key` is `sk` still exists for that user, hasn't expired and was created strictly after the user's
 revocation instant (`user_session.created_ms > app_user.revoked_at_ms`, both epoch milliseconds; the JWT's
 whole-second `iat` is too coarse). Revoking a session therefore takes effect immediately, not when the
 access token expires. Refresh applies the same session checks and deletes a session that fails them.
@@ -163,9 +167,21 @@ access token expires. Refresh applies the same session checks and deletes a sess
 
 | Presented secret matches… | Result |
 |---|---|
-| `token_hash` | Rotate: new secret, `prev_token_hash ← token_hash`, extend expiry, new cookie + access token. |
+| `token_hash` | Rotate: new secret, `prev_token_hash ← token_hash`, old hash added to `user_session_superseded` (last 50 kept per session), extend expiry, new cookie + access token. |
 | `prev_token_hash`, rotated ≤ 30 s ago | Another tab just rotated: new access token, cookie left alone. |
-| anything else | Treated as token theft: session deleted, `auth.refresh_reuse` audited, 401. |
+| `prev_token_hash` rotated longer ago, or a hash in `user_session_superseded` | A copy of an old cookie is in use — treated as token theft: session deleted, `auth.refresh_reuse` audited, 401 `SESSION_REVOKED`. |
+| nothing (or no such session) | 401 `SESSION_EXPIRED`; the session is left untouched and nothing is audited. |
+
+Only a matching secret counts against the per-session refresh limit, and only then are expiry and
+revocation checked (a dead session is then deleted, 401 `SESSION_EXPIRED`). So the session id alone — the
+part of the cookie before the dot — can't end a session, write audit rows in its owner's name, spend its
+refresh budget, or tell whether it exists: an unknown id, a wrong secret and an expired or revoked session
+all get the same response.
+
+**Sign-out** (`POST /api/auth/logout`) deletes the session (and audits `auth.logout`) only when the cookie's
+secret is the session's current one, or its previous one within the 30-second grace window; otherwise it
+does nothing. It always answers 204. Sign-out and a failed refresh clear the cookie (`Max-Age=0`) only when
+the request carried one.
 
 **Cookie**: `parsimony_refresh`, `HttpOnly; SameSite=Strict; Path=/api/auth`, plus `Secure` when the
 request was HTTPS. With `COOKIE_SECURE=auto`, that means the socket is TLS, or `TRUST_PROXY=true` and
@@ -306,6 +322,9 @@ per record type for the whole statement (the distinct keys are passed as a JSON 
   the existing second/ISO values) and drops sessions that are orphaned or not after their revocation.
 * `006_uncategorized_expense_index.sql` — partial index `expense_uncategorized_IDX` on
   `expense(account_idx) WHERE category IS NULL`, so rule runs and match counts only visit uncategorized rows.
+* `007_session_access_key.sql` — `user_session.access_key` (unique; what access tokens carry instead of the
+  session id; null for existing sessions until their next refresh) and `user_session_superseded` (hashes of
+  rotated-away refresh secrets, backfilled from `prev_token_hash`, deleted with their session by a trigger).
 
 New migrations are new files; applied files are never edited. Rolling back a deployment doesn't undo
 migrations, so migrations must stay additive: older code must keep working on the newer schema.

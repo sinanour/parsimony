@@ -34,6 +34,8 @@ interface SessionRow {
   expires_at: number;
   /** Epoch ms of creation; the session is valid only while this is > the user's revoked_at_ms. */
   created_ms: number;
+  /** What access tokens carry (`sk`) instead of the session id; null for sessions from before migration 007. */
+  access_key: string | null;
 }
 
 export interface ClientInfo {
@@ -59,6 +61,21 @@ export interface IssuedSession {
 
 /** How long a just-rotated refresh token is still accepted (concurrent refreshes from several tabs). */
 const ROTATION_GRACE_SECONDS = 30;
+/** How many superseded refresh-secret hashes are kept per session for reuse (theft) detection. */
+const SUPERSEDED_HISTORY = 50;
+
+/**
+ * Splits a refresh cookie `<sessionId>.<secret>`. Both halves are required: nothing that ends or touches a
+ * session is ever done on the session id alone.
+ */
+function parseRefreshToken(token: string | undefined): { sessionId: string; secret: string } | null {
+  const parts = (token ?? '').split('.');
+  if (parts.length !== 2 || !parts[0] || !parts[1] || parts[0].length > 64 || parts[1].length > 128) return null;
+  return { sessionId: parts[0], secret: parts[1] };
+}
+
+/** Every refresh failure a caller without the session's secret can cause looks exactly the same. */
+const refreshFailed = () => unauthorized('Your session has ended. Sign in again.', 'SESSION_EXPIRED');
 
 const nowSeconds = () => Math.floor(Date.now() / 1000);
 
@@ -88,7 +105,7 @@ export class AuthService {
   readonly loginIpLimiter: RateLimiter;
   /** Per-account (submitted email) escalating lock after repeated failures. */
   readonly loginLockout: LoginLockout;
-  /** Refresh requests per presented session id (never per IP, so other callers can't spend it). */
+  /** Refresh requests per session, counted only for callers holding one of its secrets (never per IP). */
   readonly refreshLimiter: RateLimiter;
   /** At most one audit row per throttled key per minute, so 429 floods can't flood the audit log. */
   private readonly throttleAudit = new RateLimiter(1, 60_000);
@@ -329,13 +346,15 @@ export class AuthService {
    * re-checked the account. Its created_ms is strictly after the user's current revocation instant, so it
    * survives a revocation that the same transaction already made (changePassword) and no later one.
    */
-  private insertSession(userId: number, client: ClientInfo): { sessionId: string; secret: string } {
+  private insertSession(userId: number, client: ClientInfo): { sessionId: string; secret: string; accessKey: string } {
     const u = this.db.get<{ revoked_at_ms: number }>('SELECT revoked_at_ms FROM app_user WHERE user_id = ?', [userId]);
     if (!u) throw sessionEnded();
     const sessionId = randomToken(16);
     const secret = randomToken(32);
+    // Independent of sessionId, so an access token can't be turned into (half of) a refresh cookie.
+    const accessKey = randomToken(16);
     this.db.run(
-      'INSERT INTO user_session (session_id, user_id, token_hash, expires_at, ip, user_agent, created_ms) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      'INSERT INTO user_session (session_id, user_id, token_hash, expires_at, ip, user_agent, created_ms, access_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
       [
         sessionId,
         userId,
@@ -344,14 +363,15 @@ export class AuthService {
         client.ip,
         client.userAgent?.slice(0, 300) ?? null,
         Math.max(Date.now(), Number(u.revoked_at_ms) + 1),
+        accessKey,
       ],
     );
-    return { sessionId, secret };
+    return { sessionId, secret, accessKey };
   }
 
-  private async accessFor(user: UserRow, sessionId: string): Promise<AuthSession> {
+  private async accessFor(user: UserRow, accessKey: string): Promise<AuthSession> {
     const ttl = this.config.auth.accessTokenTtl;
-    return { accessToken: await this.signer.signAccess(user.user_id, sessionId, ttl), expiresIn: ttl, user: toAuthUser(user) };
+    return { accessToken: await this.signer.signAccess(user.user_id, accessKey, ttl), expiresIn: ttl, user: toAuthUser(user) };
   }
 
   async login(email: string, password: string, client: ClientInfo): Promise<IssuedSession> {
@@ -426,7 +446,7 @@ export class AuthService {
     this.loginLockout.succeed(account);
     this.loginIpLimiter.refund(ipKey);
     this.audit({ action: 'auth.login', user: toAuthUser(issued.user), ip: client.ip });
-    return { session: await this.accessFor(issued.user, issued.sessionId), refreshToken: `${issued.sessionId}.${issued.secret}` };
+    return { session: await this.accessFor(issued.user, issued.accessKey), refreshToken: `${issued.sessionId}.${issued.secret}` };
   }
 
   async setup(code: string, input: { email: string; password: string; displayName?: string | null }, client: ClientInfo): Promise<IssuedSession> {
@@ -439,63 +459,104 @@ export class AuthService {
     const user = await this.createUser({ ...input, role: 'ADMINISTRATOR' }, { onlyIfNoUsers: true });
     this.setupCode = null;
     this.audit({ action: 'auth.setup', user, ip: client.ip });
-    const { sessionId, secret } = this.db.tx(() => this.insertSession(user.userId, client));
-    return { session: await this.accessFor(this.findById(user.userId)!, sessionId), refreshToken: `${sessionId}.${secret}` };
+    const { sessionId, secret, accessKey } = this.db.tx(() => this.insertSession(user.userId, client));
+    return { session: await this.accessFor(this.findById(user.userId)!, accessKey), refreshToken: `${sessionId}.${secret}` };
   }
 
-  /** Rotates the refresh token. Presenting an already-rotated token revokes the session (likely theft). */
-  async refresh(token: string | undefined, client: ClientInfo): Promise<IssuedSession> {
-    const [sessionId, secret] = (token ?? '').split('.');
-    if (!sessionId || !secret) throw unauthorized('Your session has ended. Sign in again.', 'SESSION_EXPIRED');
-    const s = this.db.get<SessionRow>('SELECT * FROM user_session WHERE session_id = ?', [sessionId]);
-    // Throttle per session (only sessions that exist, so random ids can't grow the limiter's memory).
-    if (s) {
-      const key = `refresh|${sessionId}`;
-      try {
-        this.refreshLimiter.hit(key);
-      } catch (e) {
-        const u = this.findById(s.user_id);
-        this.auditThrottled(key, { action: 'auth.rate_limited', user: u ? toAuthUser(u) : null, path: '/api/auth/refresh', status: 429, ip: client.ip });
-        throw e;
-      }
+  /**
+   * What the presented secret is to session `s`: its current secret, the one it rotated away from moments ago
+   * (`grace`: another tab's concurrent refresh), one it rotated away from earlier (`superseded`: a copy of an
+   * old cookie is in use, i.e. likely theft), or nothing at all (null). Only the first three prove the caller
+   * holds, or once held, this session's cookie.
+   */
+  private matchSecret(s: SessionRow, secret: string, now: number): 'current' | 'grace' | 'superseded' | null {
+    const presented = sha256(secret);
+    if (safeEqual(presented, s.token_hash)) return 'current';
+    if (s.prev_token_hash && safeEqual(presented, s.prev_token_hash)) {
+      return s.rotated_at && now - s.rotated_at <= ROTATION_GRACE_SECONDS ? 'grace' : 'superseded';
     }
+    const old = this.db.scalar<number>('SELECT COUNT(*) FROM user_session_superseded WHERE session_id = ? AND token_hash = ?', [s.session_id, presented]);
+    return old > 0 ? 'superseded' : null;
+  }
+
+  /**
+   * Rotates the refresh token. Presenting a token the session has already rotated away from (outside the
+   * short grace window) revokes the session (likely theft). A wrong secret, an unknown session, an expired
+   * or revoked one all fail identically (401 SESSION_EXPIRED) and a wrong secret changes nothing, so the
+   * session id alone can neither end a session nor tell whether it exists.
+   */
+  async refresh(token: string | undefined, client: ClientInfo): Promise<IssuedSession> {
+    const parsed = parseRefreshToken(token);
+    if (!parsed) throw refreshFailed();
+    const { sessionId, secret } = parsed;
+    const s = this.db.get<SessionRow>('SELECT * FROM user_session WHERE session_id = ?', [sessionId]);
     const now = nowSeconds();
-    if (!s || s.expires_at <= now) {
-      if (s) this.db.run('DELETE FROM user_session WHERE session_id = ?', [sessionId]);
-      throw unauthorized('Your session has ended. Sign in again.', 'SESSION_EXPIRED');
+    const match = s ? this.matchSecret(s, secret, now) : null;
+    if (!s || !match) throw refreshFailed();
+    // Throttle per session, counting only callers that hold one of its secrets: someone with just the id
+    // can't spend the owner's budget, learn that the id exists, or grow the limiter's memory.
+    const key = `refresh|${sessionId}`;
+    try {
+      this.refreshLimiter.hit(key);
+    } catch (e) {
+      const u = this.findById(s.user_id);
+      this.auditThrottled(key, { action: 'auth.rate_limited', user: u ? toAuthUser(u) : null, path: '/api/auth/refresh', status: 429, ip: client.ip });
+      throw e;
     }
     const user = this.findById(s.user_id);
-    // Defence in depth: a session whose account is gone, or that predates the account's last revocation, is dead.
-    if (!user || !sessionCurrent(s, user)) {
+    // Expired, or (defence in depth) its account is gone or it predates the account's last revocation: dead.
+    if (s.expires_at <= now || !user || !sessionCurrent(s, user)) {
       this.db.run('DELETE FROM user_session WHERE session_id = ?', [sessionId]);
-      throw unauthorized('Your session has ended. Sign in again.', 'SESSION_REVOKED');
+      throw refreshFailed();
     }
-    const presented = sha256(secret);
+    // Sessions from before migration 007 get their access key on first refresh.
+    const accessKey = s.access_key ?? randomToken(16);
 
-    if (safeEqual(presented, s.token_hash)) {
+    if (match === 'current') {
       const next = randomToken(32);
-      this.db.run(
-        `UPDATE user_session SET prev_token_hash = token_hash, token_hash = ?, rotated_at = ?, expires_at = ?,
-           last_used_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), ip = ? WHERE session_id = ?`,
-        [sha256(next), now, now + this.config.auth.refreshTokenTtl, client.ip, sessionId],
-      );
-      return { session: await this.accessFor(user, sessionId), refreshToken: `${sessionId}.${next}` };
+      this.db.tx(() => {
+        this.db.run(
+          `UPDATE user_session SET prev_token_hash = token_hash, token_hash = ?, rotated_at = ?, expires_at = ?,
+             last_used_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), ip = ?, access_key = ? WHERE session_id = ?`,
+          [sha256(next), now, now + this.config.auth.refreshTokenTtl, client.ip, accessKey, sessionId],
+        );
+        this.db.run('INSERT OR IGNORE INTO user_session_superseded (session_id, token_hash, superseded_at) VALUES (?, ?, ?)', [
+          sessionId,
+          s.token_hash,
+          now,
+        ]);
+        this.db.run(
+          `DELETE FROM user_session_superseded WHERE session_id = ? AND rowid NOT IN
+             (SELECT rowid FROM user_session_superseded WHERE session_id = ? ORDER BY superseded_at DESC, rowid DESC LIMIT ?)`,
+          [sessionId, sessionId, SUPERSEDED_HISTORY],
+        );
+      });
+      return { session: await this.accessFor(user, accessKey), refreshToken: `${sessionId}.${next}` };
     }
-    if (s.prev_token_hash && safeEqual(presented, s.prev_token_hash) && s.rotated_at && now - s.rotated_at <= ROTATION_GRACE_SECONDS) {
+    if (match === 'grace') {
       // Another tab rotated a moment ago; the browser already holds the new cookie.
-      return { session: await this.accessFor(user, sessionId), refreshToken: null };
+      if (!s.access_key) this.db.run('UPDATE user_session SET access_key = ? WHERE session_id = ?', [accessKey, sessionId]);
+      return { session: await this.accessFor(user, accessKey), refreshToken: null };
     }
+    // A secret this session has genuinely rotated away from: two holders of the cookie, so end the session.
     this.db.run('DELETE FROM user_session WHERE session_id = ?', [sessionId]);
     this.audit({ action: 'auth.refresh_reuse', user: toAuthUser(user), ip: client.ip, details: 'Rotated refresh token reused; session revoked' });
     throw unauthorized('Your session has ended. Sign in again.', 'SESSION_REVOKED');
   }
 
+  /**
+   * Ends the session the cookie belongs to, but only if the cookie's secret is the session's current one (or
+   * the one rotated away from within the grace window, for a tab that hasn't seen the new cookie yet).
+   * Anything else is silently ignored: no deletion, no audit row. The route answers 204 either way.
+   */
   logout(token: string | undefined, client: ClientInfo): void {
-    const [sessionId] = (token ?? '').split('.');
-    if (!sessionId) return;
-    const s = this.db.get<SessionRow>('SELECT * FROM user_session WHERE session_id = ?', [sessionId]);
+    const parsed = parseRefreshToken(token);
+    if (!parsed) return;
+    const s = this.db.get<SessionRow>('SELECT * FROM user_session WHERE session_id = ?', [parsed.sessionId]);
     if (!s) return;
-    this.db.run('DELETE FROM user_session WHERE session_id = ?', [sessionId]);
+    const match = this.matchSecret(s, parsed.secret, nowSeconds());
+    if (match !== 'current' && match !== 'grace') return;
+    this.db.run('DELETE FROM user_session WHERE session_id = ?', [s.session_id]);
     const u = this.findById(s.user_id);
     this.audit({ action: 'auth.logout', user: u ? toAuthUser(u) : null, ip: client.ip });
   }
@@ -524,13 +585,14 @@ export class AuthService {
     const claims = await this.signer.verifyAccess(m[1]);
     if (!claims) throw unauthorized('Your session has expired', 'TOKEN_EXPIRED');
     const user = this.findById(claims.userId);
-    // An access token is only as good as its session row: it must exist, belong to this (existing) user and
-    // have been created strictly after the user's last revocation. That comparison is in ms (the token's own
-    // `iat` is whole seconds, too coarse: a token minted in the same second as a revocation used to survive it).
+    // An access token is only as good as its session row (found by its access key, never by session id): it must
+    // exist, belong to this (existing) user and have been created strictly after the user's last revocation. That
+    // comparison is in ms (the token's whole-second `iat` is too coarse: a token minted in the same second as a
+    // revocation used to survive it).
     if (!user) throw sessionEnded();
     const s = this.db.get<{ expires_at: number; created_ms: number }>(
-      'SELECT expires_at, created_ms FROM user_session WHERE session_id = ? AND user_id = ?',
-      [claims.sessionId, user.user_id],
+      'SELECT expires_at, created_ms FROM user_session WHERE access_key = ? AND user_id = ?',
+      [claims.accessKey, user.user_id],
     );
     if (!s || s.expires_at <= nowSeconds() || !sessionCurrent(s, user)) throw sessionEnded();
     return toAuthUser(user);
@@ -551,7 +613,7 @@ export class AuthService {
       if (!unchanged(u)) throw sessionEnded();
       if (!(await this.passwords.verify(current, u.password_hash))) throw badRequest('The current password is not correct');
       const hash = await this.passwords.hash(next);
-      const { sessionId, secret } = this.db.tx(() => {
+      const { sessionId, secret, accessKey } = this.db.tx(() => {
         if (!unchanged(this.reread(u))) throw sessionEnded();
         // Only replace the hash that was verified above.
         const r = this.db.run(
@@ -566,7 +628,7 @@ export class AuthService {
       });
       const fresh = this.findById(userId)!;
       this.audit({ action: 'auth.password_changed', user: toAuthUser(fresh), ip: client.ip });
-      return { session: await this.accessFor(fresh, sessionId), refreshToken: `${sessionId}.${secret}` };
+      return { session: await this.accessFor(fresh, accessKey), refreshToken: `${sessionId}.${secret}` };
     });
   }
 

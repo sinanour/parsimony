@@ -26,15 +26,18 @@ export function loadJwtSecret(configured: string, dataDir: string): Uint8Array {
 
 export interface AccessClaims {
   userId: number;
-  sessionId: string;
-  issuedAt: number;
+  /**
+   * The session's `access_key`: random and unrelated to the session id, so an access token (even a leaked,
+   * expired one) never reveals the first half of the refresh cookie.
+   */
+  accessKey: string;
 }
 
 export class TokenSigner {
   constructor(private readonly secret: Uint8Array) {}
 
-  signAccess(userId: number, sessionId: string, ttlSeconds: number): Promise<string> {
-    return new SignJWT({ sid: sessionId, typ: 'access' })
+  signAccess(userId: number, accessKey: string, ttlSeconds: number): Promise<string> {
+    return new SignJWT({ sk: accessKey, typ: 'access' })
       .setProtectedHeader({ alg: 'HS256' })
       .setSubject(String(userId))
       .setIssuer(ISSUER)
@@ -47,8 +50,10 @@ export class TokenSigner {
   async verifyAccess(token: string): Promise<AccessClaims | null> {
     try {
       const { payload } = await jwtVerify(token, this.secret, { issuer: ISSUER, algorithms: ['HS256'] });
-      if (payload.typ !== 'access' || typeof payload.sid !== 'string' || !payload.sub || !payload.iat) return null;
-      return { userId: Number(payload.sub), sessionId: payload.sid, issuedAt: payload.iat };
+      // Tokens from before the `sk` claim (which carried the raw session id as `sid`) are refused; the SPA
+      // treats that like an expired token and refreshes with its cookie.
+      if (payload.typ !== 'access' || typeof payload.sk !== 'string' || !payload.sk || !payload.sub) return null;
+      return { userId: Number(payload.sub), accessKey: payload.sk };
     } catch (e) {
       if (e instanceof joseErrors.JOSEError) return null;
       throw e;
