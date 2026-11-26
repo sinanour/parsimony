@@ -1,6 +1,8 @@
 import { useMemo, useState, type ReactNode } from 'react';
 import { useNavigate } from 'react-router-dom';
 import Autosuggest from '@cloudscape-design/components/autosuggest';
+// eslint-disable-next-line no-restricted-imports -- the app-wide Badge wrapper below is the one sanctioned use.
+import CloudscapeBadge, { type BadgeProps } from '@cloudscape-design/components/badge';
 import Box from '@cloudscape-design/components/box';
 import Button from '@cloudscape-design/components/button';
 import DateRangePicker, { type DateRangePickerProps } from '@cloudscape-design/components/date-range-picker';
@@ -11,6 +13,21 @@ import Select, { type SelectProps } from '@cloudscape-design/components/select';
 import SpaceBetween from '@cloudscape-design/components/space-between';
 import { TEXT_LIMITS, type Scope } from '../../../shared/types';
 import { useApp } from '../context/AppContext';
+
+/**
+ * Cloudscape Badge whose label never wraps. Cloudscape sets white-space: normal on
+ * the badge, so in narrow table columns (e.g. on mobile) a label like "Expense"
+ * breaks mid-word. The inner span overrides the inherited value using only the
+ * public `children` API. Use this instead of importing Cloudscape's Badge directly
+ * (enforced by ESLint).
+ */
+export function Badge({ children, ...rest }: BadgeProps) {
+  return (
+    <CloudscapeBadge {...rest}>
+      <span style={{ whiteSpace: 'nowrap' }}>{children}</span>
+    </CloudscapeBadge>
+  );
+}
 
 /** Cloudscape link that navigates client-side. */
 export function RouterLink({ href, children, ...rest }: Omit<LinkProps, 'onFollow'> & { href: string; children: ReactNode }) {

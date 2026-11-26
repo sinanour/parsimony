@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
 import AttributeEditor from '@cloudscape-design/components/attribute-editor';
-import Badge from '@cloudscape-design/components/badge';
 import Box from '@cloudscape-design/components/box';
 import Button from '@cloudscape-design/components/button';
 import Checkbox from '@cloudscape-design/components/checkbox';
@@ -18,7 +17,7 @@ import TextFilter from '@cloudscape-design/components/text-filter';
 import Toggle from '@cloudscape-design/components/toggle';
 import { TEXT_LIMITS, type Account, type AccountInput } from '../../../shared/types';
 import { api } from '../api/client';
-import { ConfirmModal, EmptyState } from '../components/common';
+import { Badge, ConfirmModal, EmptyState } from '../components/common';
 import { useApp } from '../context/AppContext';
 import { useAuth } from '../context/AuthContext';
 import { useAsync } from '../hooks/useAsync';

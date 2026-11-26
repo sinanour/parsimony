@@ -4,15 +4,21 @@
   "private": true,
   "description": "Self-hosted bookkeeping: accounts, bills, statement imports, categorization rules and reports",
   "license": "MIT",
-  "workspaces": ["backend-api", "web-frontend"],
-  "engines": { "node": ">=22.13" },
+  "workspaces": [
+    "backend-api",
+    "web-frontend"
+  ],
+  "engines": {
+    "node": ">=22.13"
+  },
   "scripts": {
     "dev": "concurrently -k -n api,web -c blue,green \"npm run dev -w backend-api\" \"npm run dev -w web-frontend\"",
     "build": "npm run build -w web-frontend",
     "start": "npm run build && npm run start -w backend-api",
     "test": "npm test -w backend-api && npm test --prefix deployment",
     "typecheck": "npm run typecheck -w backend-api && npm run typecheck -w web-frontend",
-    "users": "npm run users -w backend-api --"
+    "users": "npm run users -w backend-api --",
+    "lint": "npm run lint -w web-frontend"
   },
   "devDependencies": {
     "concurrently": "^9.1.0"

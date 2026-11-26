@@ -1,6 +1,5 @@
 import { useMemo, useState } from 'react';
 import Alert from '@cloudscape-design/components/alert';
-import Badge from '@cloudscape-design/components/badge';
 import Box from '@cloudscape-design/components/box';
 import Button from '@cloudscape-design/components/button';
 import Checkbox from '@cloudscape-design/components/checkbox';
@@ -17,7 +16,7 @@ import StatusIndicator from '@cloudscape-design/components/status-indicator';
 import Table from '@cloudscape-design/components/table';
 import { UNCATEGORIZED, type ImportCommitResponse, type ImportParseResponse, type ImportRecord } from '../../../shared/types';
 import { api } from '../api/client';
-import { AccountSelect, RouterLink } from '../components/common';
+import { AccountSelect, Badge, RouterLink } from '../components/common';
 import { useApp } from '../context/AppContext';
 import { useAuth } from '../context/AuthContext';
 import { errorMessage, formatMoney, pluralize } from '../utils/format';
