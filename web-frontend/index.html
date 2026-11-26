@@ -21,10 +21,18 @@
       /* iOS Safari zooms the page when a form field whose font-size is below
          16px gains focus, and it does not zoom back out on blur. Cloudscape
          renders inputs, textareas and filter/search fields at 14px, so on touch
-         devices raise every editable field (and its placeholder) to 16px. The
-         fields' 20px line-height and 32px minimum height already fit 16px text,
-         so the layout is unchanged. !important is needed to beat Cloudscape's
-         class-scoped rules. Desktop (fine pointer) keeps the 14px design. */
+         devices raise every editable field (and its placeholder) to 16px.
+         !important is needed to beat Cloudscape's class-scoped rules. Desktop
+         (fine pointer) keeps the 14px design.
+
+         At 16px, Safari grows the input's line box past Cloudscape's 20px
+         line-height, so text fields ended up a few pixels taller than the
+         button-style fields (Select, DateRangePicker, and SegmentedControl,
+         which turns into a Select on narrow screens). To make the heights
+         predictable, pin the input line-height to 24px (5px padding top and
+         bottom plus a 1px border gives 36px) and give those triggers the same
+         36px minimum. Filtering-token triggers size to their token, so they
+         are left out. */
       @media (hover: none) and (pointer: coarse) {
         input:not([type='checkbox']):not([type='radio']):not([type='range']):not([type='file']):not([type='button']):not([type='submit']):not([type='reset']):not([type='image']):not([type='color']),
         textarea,
@@ -32,6 +40,14 @@
         input::placeholder,
         textarea::placeholder {
           font-size: 16px !important;
+        }
+
+        [class*='awsui_input_'] {
+          line-height: 24px !important;
+        }
+
+        [class*='awsui_button-trigger_']:not([class*='awsui_in-filtering-token-']) {
+          min-block-size: 36px !important;
         }
       }
     </style>

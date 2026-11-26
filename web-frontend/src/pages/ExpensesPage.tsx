@@ -411,7 +411,6 @@ export default function ExpensesPage() {
               ariaLabel: 'Exemption',
               editIconAriaLabel: 'editable',
               errorIconAriaLabel: 'Exemption error',
-              constraintText: '≤ 1 is a fraction, > 1 is dollars',
               validation: (_item, value) => (value === undefined ? undefined : validateExemption(String(value))),
               editingCell: (item, { currentValue, setValue }) => (
                 <Input
