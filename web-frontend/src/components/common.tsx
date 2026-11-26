@@ -35,7 +35,7 @@ export function ScopeControl({ value, onChange, includeAll = true }: { value: Sc
     { id: 'corporate', text: 'Corporate' },
     ...(includeAll ? [{ id: 'all', text: 'All' }] : []),
   ];
-  return <SegmentedControl label="Scope" selectedId={value} options={options} onChange={(e) => onChange(e.detail.selectedId as Scope)} />;
+  return <SegmentedControl selectedId={value} options={options} onChange={(e) => onChange(e.detail.selectedId as Scope)} />;
 }
 
 interface AccountSelectProps {
