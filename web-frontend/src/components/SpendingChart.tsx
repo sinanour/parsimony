@@ -149,7 +149,7 @@ export default function SpendingChart() {
               return { valid: true };
             }}
           />
-          <SegmentedControl label="Grouping" selectedId={grouping} options={GROUPINGS} onChange={(e) => setGrouping(e.detail.selectedId as SpendingGrouping)} />
+          <SegmentedControl selectedId={grouping} options={GROUPINGS} onChange={(e) => setGrouping(e.detail.selectedId as SpendingGrouping)} />
           <Multiselect
             options={options}
             selectedOptions={selectedOptions}
