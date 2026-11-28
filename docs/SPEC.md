@@ -127,7 +127,13 @@ is a separate package because only operators need it.
 * F5 — The built-in formats are seeded by a migration and can be edited like any other.
 
 ### 5.9 Reports
-* G1 — Huqúqu'lláh: edit the date range; show the payment estimate, expense summary by category and exemption class, and income by description.
+* G1 — Huqúqu'lláh: edit the date range; show the payment estimate, expense summary by category and exemption class (ending in a totals row, each total under its column), and income by description.
+* G1a — Between the payment estimate and the expense summary, three charts of equal height sit side by side when the content area is at least 1120px wide and otherwise stack vertically, never in two columns:
+  1. *Income and spending* — a stacked vertical bar chart with two bars: *Income* (total income), and *Expenses* stacked from exempt, non-exempt and uncategorized expenses plus the estimated payment. An *Expenses* bar taller than the *Income* bar shows the period was overspent.
+  2. *Exempt expenses* — a donut of exempt expenses by category, with their total in the centre.
+  3. *Non-exempt expenses* — a donut of non-exempt expenses by category, with their total in the centre.
+
+  Each chart shows an empty state when it has nothing to show. The expense charts show at most seven slices: categories under 3% of the chart's total, and any past the sixth largest, are grouped into an *Other* slice whose popover lists them. *Other* is used only when it would group at least two categories.
 * G2 — Business: edit the date range; table of business transactions with CSV download for the accountant.
 * G3 — Payment totals by year and payee, filterable by year and by scope with a *Personal / Corporate / All* segmented control (default *All*), as on the transaction lists. Scope follows the paying account's `is_corporate` flag.
 * G4 — Statement coverage per account.
