@@ -1,8 +1,8 @@
 import { z } from 'zod';
 import type { Db } from '../db';
 import { badRequest, Reply } from '../http';
-import { TEXT_LIMITS } from '../../../shared/types';
-import type { CorporateReport, CorporateRow, CoverageRow, DashboardData, DateRange, HuquqReport, Meta, MonthlySpendingRow, PaymentTotalRow } from '../../../shared/types';
+import { SPENDING_MAX_PERIODS, TEXT_LIMITS } from '../../../shared/types';
+import type { CorporateReport, CorporateRow, CoverageRow, DashboardData, DateRange, HuquqReport, Meta, PaymentTotalRow, SpendingGrouping, SpendingReport } from '../../../shared/types';
 import { upcomingPayments } from './payments';
 import { redactForRole, visibleSql } from '../redact';
 import { isoDate, localToday, queryObject, scopeClause, scopeSchema, type RouteModule } from './common';
@@ -25,6 +25,55 @@ function setRange(db: Db, table: 'huquq_date_range' | 'corporate_date_range', bo
     db.run(`INSERT INTO ${table} (start_date, end_date) VALUES (?, ?)`, [r.startDate, r.endDate]);
   });
   return r;
+}
+
+/** Categories that move money around rather than spend it; '' stands for uncategorized. */
+const NON_SPENDING_CATEGORIES = ['', 'Transfer', '3rd Party', 'Huquq'];
+
+const spendingQuery = z
+  .object({
+    scope: z.enum(['personal', 'corporate']).default('personal'),
+    grouping: z.enum(['month', 'quarter', 'year']).default('month'),
+    months: z.coerce.number().int().min(1).max(SPENDING_MAX_PERIODS).optional(),
+    startDate: isoDate.optional(),
+    endDate: isoDate.optional(),
+  })
+  .refine((q) => (q.startDate === undefined) === (q.endDate === undefined), { message: 'Give both startDate and endDate, or neither', path: ['endDate'] })
+  .refine((q) => q.months === undefined || q.startDate === undefined, { message: 'Give either months or a date range, not both', path: ['months'] })
+  .refine((q) => !q.startDate || !q.endDate || q.startDate <= q.endDate, { message: 'End date must not be before start date', path: ['endDate'] });
+
+/** `YYYY-MM-DD` plus `n` calendar months (the day must be valid in every month, e.g. the 1st). */
+function addMonths(iso: string, n: number): string {
+  const total = Number(iso.slice(0, 4)) * 12 + Number(iso.slice(5, 7)) - 1 + n;
+  return `${String(Math.floor(total / 12)).padStart(4, '0')}-${String((total % 12) + 1).padStart(2, '0')}${iso.slice(7)}`;
+}
+
+/** The period label of a `YYYY-MM-DD` date: `2026-03`, `2026 Q1` or `2026`. */
+function periodOf(iso: string, g: SpendingGrouping): string {
+  if (g === 'month') return iso.slice(0, 7);
+  if (g === 'year') return iso.slice(0, 4);
+  return `${iso.slice(0, 4)} Q${Math.floor((Number(iso.slice(5, 7)) - 1) / 3) + 1}`;
+}
+
+/** SQL for the same label as periodOf(). */
+function periodSql(g: SpendingGrouping, col: string): string {
+  if (g === 'month') return `strftime('%Y-%m', ${col})`;
+  if (g === 'year') return `strftime('%Y', ${col})`;
+  return `strftime('%Y', ${col}) || ' Q' || ((CAST(strftime('%m', ${col}) AS INTEGER) + 2) / 3)`;
+}
+
+/** Every period label from the one holding `start` to the one holding `end`, in order. */
+function periodsBetween(start: string, end: string, g: SpendingGrouping): string[] {
+  const step = g === 'month' ? 1 : g === 'quarter' ? 3 : 12;
+  const out: string[] = [];
+  const last = periodOf(end, g);
+  // Walk month starts; stop early past the cap so a huge range can't allocate a huge array.
+  for (let m = `${start.slice(0, 7)}-01`; out.length <= SPENDING_MAX_PERIODS; m = addMonths(m, step)) {
+    const p = periodOf(m, g);
+    if (out[out.length - 1] !== p) out.push(p);
+    if (p === last) break;
+  }
+  return out;
 }
 
 export function coverage(db: Db): CoverageRow[] {
@@ -99,23 +148,33 @@ export const reportRoutes: RouteModule = (r, { db }) => {
     };
   });
 
-  r.get('/api/reports/monthly-spending', ({ query }): MonthlySpendingRow[] => {
-    const q = z
-      .object({ months: z.coerce.number().int().min(1).max(120).default(12), scope: scopeSchema, end: isoDate.optional() })
-      .parse(queryObject(query));
-    // Anchor on the latest expense so the chart is useful even if statements lag behind.
-    const end = q.end ?? db.scalar<string>('SELECT MAX(transaction_date) FROM expense') ?? localToday();
-    return db
-      .all<{ month: string; category: string; total: number }>(
-        `SELECT strftime('%Y-%m', e.transaction_date) AS month, e.category, ROUND(SUM(e.amount), 2) AS total
+  r.get('/api/reports/spending', ({ query }): SpendingReport => {
+    const q = spendingQuery.parse(queryObject(query));
+    let { startDate, endDate } = q;
+    if (!startDate || !endDate) {
+      // Relative ranges anchor on the latest expense in the scope, so the chart stays useful when
+      // statements lag behind.
+      endDate =
+        db.scalar<string>(`SELECT MAX(e.transaction_date) FROM expense e JOIN account a USING (account_idx) WHERE ${scopeClause(q.scope)}`) ??
+        localToday();
+      startDate = addMonths(`${endDate.slice(0, 7)}-01`, -((q.months ?? 12) - 1));
+    }
+    const periods = periodsBetween(startDate, endDate, q.grouping);
+    if (periods.length > SPENDING_MAX_PERIODS) {
+      throw badRequest(`That range has ${periods.length} periods; choose a shorter range or a coarser grouping (at most ${SPENDING_MAX_PERIODS}).`);
+    }
+    const rows = db
+      .all<{ period: string; category: string; total: number }>(
+        `SELECT ${periodSql(q.grouping, 'e.transaction_date')} AS period, e.category, ROUND(SUM(e.amount), 2) AS total
          FROM expense e JOIN account a USING (account_idx)
          WHERE ${scopeClause(q.scope)}
-           AND COALESCE(e.category, '') NOT IN ('', 'Transfer', '3rd Party', 'Huquq')
-           AND e.transaction_date >= date(?, 'start of month', ?) AND e.transaction_date <= ?
+           AND COALESCE(e.category, '') NOT IN (${NON_SPENDING_CATEGORIES.map(() => '?').join(', ')})
+           AND e.transaction_date >= ? AND e.transaction_date <= ?
          GROUP BY 1, 2 ORDER BY 1, 2`,
-        [end, `-${q.months - 1} months`, end],
+        [...NON_SPENDING_CATEGORIES, startDate, endDate],
       )
-      .map((x) => ({ month: x.month, category: x.category, total: x.total }));
+      .map((x) => ({ period: x.period, category: x.category, total: x.total }));
+    return { startDate, endDate, grouping: q.grouping, periods, rows };
   });
 
   r.get('/api/reports/huquq', (): HuquqReport => {

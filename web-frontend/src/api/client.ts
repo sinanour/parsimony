@@ -26,7 +26,6 @@ import type {
   ImportCommitResponse,
   ImportParseResponse,
   Meta,
-  MonthlySpendingRow,
   Paged,
   Payee,
   PayeeInput,
@@ -38,6 +37,8 @@ import type {
   RulePreview,
   RuleRunResponse,
   Scope,
+  SpendingQuery,
+  SpendingReport,
   PdfLayoutInfo,
   StatementFormat,
   StatementFormatInput,
@@ -274,7 +275,6 @@ export const api = {
     downloadCorporateCsv: () => download('/api/reports/corporate?format=csv', 'corporate-transactions.csv'),
     paymentTotals: (scope: Scope = 'all') => request<PaymentTotalRow[]>('GET', `/api/reports/payment-totals${qs({ scope })}`),
     coverage: () => request<CoverageRow[]>('GET', '/api/reports/coverage'),
-    monthlySpending: (months: number, scope: 'personal' | 'corporate') =>
-      request<MonthlySpendingRow[]>('GET', `/api/reports/monthly-spending${qs({ months, scope })}`),
+    spending: (q: SpendingQuery) => request<SpendingReport>('GET', `/api/reports/spending${qs(q)}`),
   },
 };

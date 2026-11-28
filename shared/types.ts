@@ -366,11 +366,36 @@ export interface CoverageRow {
   missingMonthCount: number;
 }
 
-export interface MonthlySpendingRow {
-  month: string;
+export type SpendingGrouping = 'month' | 'quarter' | 'year';
+
+/** Query for GET /api/reports/spending: either `months` (relative to the latest expense) or both dates. */
+export interface SpendingQuery {
+  scope: 'personal' | 'corporate';
+  grouping: SpendingGrouping;
+  months?: number;
+  startDate?: string;
+  endDate?: string;
+}
+
+export interface SpendingRow {
+  /** `2026-03`, `2026 Q1` or `2026`, depending on the grouping. */
+  period: string;
   category: string;
   total: number;
 }
+
+export interface SpendingReport {
+  /** The resolved, inclusive range. */
+  startDate: string;
+  endDate: string;
+  grouping: SpendingGrouping;
+  /** Every period in the range, in order, including periods with no spending. */
+  periods: string[];
+  rows: SpendingRow[];
+}
+
+/** Most periods one spending report may span. */
+export const SPENDING_MAX_PERIODS = 240;
 
 export interface DateRange {
   startDate: string;

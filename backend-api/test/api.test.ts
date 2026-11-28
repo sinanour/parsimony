@@ -358,8 +358,47 @@ describe('reports', () => {
     assert.ok(Math.abs(sumAll(personal) + sumAll(corporate) - sumAll(all)) <= all.length);
     assert.equal((await api('GET', '/api/reports/payment-totals?scope=bogus')).status, 400);
     assert.ok((await api('GET', '/api/reports/coverage')).data.length > 0);
-    const m = await api('GET', '/api/reports/monthly-spending?months=12&scope=personal');
-    assert.ok(m.data.length > 0 && new Set(m.data.map((r: any) => r.month)).size <= 12);
+  });
+  test('spending report: relative and absolute ranges, groupings and validation', async () => {
+    const m = (await api('GET', '/api/reports/spending?months=12&scope=personal')).data;
+    assert.equal(m.grouping, 'month');
+    assert.equal(m.periods.length, 12);
+    assert.equal(m.startDate.slice(8), '01');
+    assert.ok(m.rows.length > 0 && m.rows.every((r: any) => m.periods.includes(r.period)));
+    assert.ok(m.rows.every((r: any) => !['', 'Transfer', '3rd Party', 'Huquq'].includes(r.category ?? '')));
+    // The default is the last 12 months, monthly, personal.
+    assert.deepEqual((await api('GET', '/api/reports/spending')).data, m);
+
+    const total = (rows: any[]) => Math.round(rows.reduce((s, r) => s + r.total, 0) * 100);
+    const range = `startDate=2020-02-15&endDate=2023-11-03&scope=personal`;
+    const [mo, qu, yr] = await Promise.all(
+      ['month', 'quarter', 'year'].map(async (g) => (await api('GET', `/api/reports/spending?${range}&grouping=${g}`)).data),
+    );
+    assert.equal(mo.periods[0], '2020-02');
+    assert.equal(mo.periods.at(-1), '2023-11');
+    assert.equal(mo.periods.length, 46);
+    assert.deepEqual(qu.periods.slice(0, 2), ['2020 Q1', '2020 Q2']);
+    assert.equal(qu.periods.at(-1), '2023 Q4');
+    assert.equal(qu.periods.length, 16);
+    assert.deepEqual(yr.periods, ['2020', '2021', '2022', '2023']);
+    // Rows are rounded to cents individually, so allow a cent of drift per row.
+    assert.ok(Math.abs(total(mo.rows) - total(qu.rows)) <= mo.rows.length);
+    assert.ok(Math.abs(total(mo.rows) - total(yr.rows)) <= mo.rows.length);
+    const one = (await api('GET', '/api/reports/spending?startDate=2024-05-10&endDate=2024-05-10&grouping=year')).data;
+    assert.deepEqual(one.periods, ['2024']);
+
+    for (const bad of [
+      'scope=all',
+      'grouping=week',
+      'startDate=2024-01-01',
+      'months=6&startDate=2024-01-01&endDate=2024-02-01',
+      'startDate=2024-02-01&endDate=2024-01-01',
+      'months=0',
+      'startDate=1900-01-01&endDate=2024-01-01',
+    ]) {
+      assert.equal((await api('GET', `/api/reports/spending?${bad}`)).status, 400, bad);
+    }
+    assert.equal((await api('GET', '/api/reports/spending?startDate=1900-01-01&endDate=2024-01-01&grouping=year')).status, 200);
   });
   test('unknown API routes 404; wrong method 405', async () => {
     assert.equal((await api('GET', '/api/nope')).status, 404);

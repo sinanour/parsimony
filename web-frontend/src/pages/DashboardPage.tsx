@@ -1,5 +1,4 @@
-import { useMemo, useState } from 'react';
-import BarChart, { type BarChartProps } from '@cloudscape-design/components/bar-chart';
+import { useState } from 'react';
 import Box from '@cloudscape-design/components/box';
 import Container from '@cloudscape-design/components/container';
 import ContentLayout from '@cloudscape-design/components/content-layout';
@@ -9,51 +8,21 @@ import KeyValuePairs from '@cloudscape-design/components/key-value-pairs';
 import SpaceBetween from '@cloudscape-design/components/space-between';
 import StatusIndicator from '@cloudscape-design/components/status-indicator';
 import Table from '@cloudscape-design/components/table';
-import { UNCATEGORIZED, type MonthlySpendingRow, type Scope } from '../../../shared/types';
+import { UNCATEGORIZED } from '../../../shared/types';
 import { api } from '../api/client';
-import { RouterLink, ScopeControl } from '../components/common';
+import { RouterLink } from '../components/common';
 import { DueStatus } from '../components/DueStatus';
 import { ResponsiveButton } from '../components/ResponsiveButton';
 import PaymentModal from '../components/PaymentModal';
+import SpendingChart from '../components/SpendingChart';
 import { useAsync } from '../hooks/useAsync';
 import { formatMoney } from '../utils/format';
 import { useAuth } from '../context/AuthContext';
 
-const TOP_CATEGORIES = 7;
-
-function spendingSeries(rows: MonthlySpendingRow[]): { series: BarChartProps<string>['series']; months: string[] } {
-  const months = [...new Set(rows.map((r) => r.month))].sort();
-  const byCategory = new Map<string, number>();
-  rows.forEach((r) => byCategory.set(r.category, (byCategory.get(r.category) ?? 0) + r.total));
-  const top = [...byCategory.entries()].sort((a, b) => b[1] - a[1]).slice(0, TOP_CATEGORIES).map(([c]) => c);
-  const bucket = (c: string) => (top.includes(c) ? c : 'Other');
-  const totals = new Map<string, Map<string, number>>();
-  for (const r of rows) {
-    const k = bucket(r.category);
-    const m = totals.get(k) ?? new Map<string, number>();
-    m.set(r.month, (m.get(r.month) ?? 0) + r.total);
-    totals.set(k, m);
-  }
-  const order = [...top, ...(totals.has('Other') ? ['Other'] : [])];
-  return {
-    months,
-    series: order.map((c) => ({
-      title: c,
-      type: 'bar' as const,
-      data: months.map((m) => ({ x: m, y: Math.round((totals.get(c)?.get(m) ?? 0) * 100) / 100 })),
-      valueFormatter: (v: number) => formatMoney(v),
-    })),
-  };
-}
-
 export default function DashboardPage() {
   const { canEdit } = useAuth();
   const dash = useAsync(() => api.dashboard(), []);
-  const [scope, setScope] = useState<Scope>('personal');
-  const spending = useAsync(() => api.reports.monthlySpending(12, scope === 'corporate' ? 'corporate' : 'personal'), [scope]);
   const [payFor, setPayFor] = useState<number | null>(null);
-
-  const chart = useMemo(() => spendingSeries(spending.data ?? []), [spending.data]);
   const d = dash.data;
 
   const countLink = (n: number | undefined, href: string) =>
@@ -119,29 +88,7 @@ export default function DashboardPage() {
           ]}
         />
 
-        <Container
-          header={
-            <Header variant="h2" description="Last 12 months of statements, excluding transfers" actions={<ScopeControl value={scope} onChange={setScope} includeAll={false} />}>
-              Spending by month
-            </Header>
-          }
-        >
-          <BarChart
-            series={chart.series}
-            xDomain={chart.months}
-            xScaleType="categorical"
-            stackedBars
-            height={280}
-            xTitle="Month"
-            yTitle="Spending"
-            hideFilter={false}
-            statusType={spending.loading ? 'loading' : spending.error ? 'error' : 'finished'}
-            errorText={spending.error}
-            empty={<Box textAlign="center" color="inherit">No categorized spending.</Box>}
-            i18nStrings={{ yTickFormatter: (v: number) => `$${Math.round(v).toLocaleString()}` }}
-            ariaLabel="Spending by month"
-          />
-        </Container>
+        <SpendingChart />
 
         <Table
           header={

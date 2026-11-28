@@ -127,7 +127,8 @@ function readUrls(): string[] {
     '/api/expenses?pageSize=500&scope=corporate',
     '/api/deposits?pageSize=500&sort=accountName',
     '/api/payments?pageSize=500&sort=payerAccountName',
-    '/api/reports/monthly-spending?scope=all',
+    '/api/reports/spending?startDate=1900-01-01&endDate=2099-12-31&grouping=year',
+    '/api/reports/spending?startDate=1900-01-01&endDate=2099-12-31&grouping=year&scope=corporate',
   ]);
 }
 
